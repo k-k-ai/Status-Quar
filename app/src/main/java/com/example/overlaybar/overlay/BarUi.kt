@@ -15,8 +15,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -24,24 +24,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.graphics.PathMeasure
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -154,6 +154,9 @@ fun status_bar_overlay(
             config.weatherBackdrop
         }
     }
+    val liveDisplayCode = remember(config.weatherCode, config.hourlyWCodes) {
+        hourlyCodes.firstOrNull() ?: config.weatherCode
+    }
     val isWeatherImmersive = config.weatherMode == 0 || config.weatherMode == 3
     val solarBrightness: Float = if (config.weatherLat != 0f) {
         solar_brightness(config.weatherLat, config.weatherLon, currentHour, currentMinute, currentDayOfYear)
@@ -261,7 +264,12 @@ fun status_bar_overlay(
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
-            }.copy(battery_level_slice = if (!battery_snapshot.charging) battery_snapshot.level / 100f else -1f))
+            }.copy(
+                battery_level_slice = battery_snapshot.level / 100f,
+                battery_level_value = battery_snapshot.level,
+                battery_charging = battery_snapshot.charging,
+                battery_full = battery_snapshot.full
+            ))
         }
         val gs = config.gifSettings
         if (config.showGif && config.gifUri != null && gs.alignment == ALIGN_LEFT) {
@@ -316,7 +324,12 @@ fun status_bar_overlay(
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
-            }.copy(battery_level_slice = if (!battery_snapshot.charging) battery_snapshot.level / 100f else -1f))
+            }.copy(
+                battery_level_slice = battery_snapshot.level / 100f,
+                battery_level_value = battery_snapshot.level,
+                battery_charging = battery_snapshot.charging,
+                battery_full = battery_snapshot.full
+            ))
         }
         val gs = config.gifSettings
         if (config.showGif && config.gifUri != null && gs.alignment != ALIGN_LEFT) {
@@ -386,14 +399,17 @@ fun status_bar_overlay(
         warmupDone = true
     }
 
+    val leftLaneVerticalOffset = VERTICAL_TRIM_BASELINE_DP + config.leftVerticalOffsetDp
+    val rightLaneVerticalOffset = VERTICAL_TRIM_BASELINE_DP + config.rightVerticalOffsetDp
+
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
         Box(modifier = Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.TopStart) {
             // Status bar pills - use TopCenter to avoid vertical centering shifts on expand
             Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.TopCenter) {
-                overlay_lane(left_elements, true, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, 42 + config.leftVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
+                overlay_lane(left_elements, true, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, leftLaneVerticalOffset, solarBrightness, clearWayheadProgress) { id, rect ->
                     elementBoundsMap = elementBoundsMap + (id to rect)
                 }
-                overlay_lane(right_elements, false, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, 42 + config.rightVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
+                overlay_lane(right_elements, false, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, rightLaneVerticalOffset, solarBrightness, clearWayheadProgress) { id, rect ->
                     elementBoundsMap = elementBoundsMap + (id to rect)
                 }
             }
@@ -411,7 +427,7 @@ fun status_bar_overlay(
                 OverlayElementId.WEATHER -> 186.dp
                 OverlayElementId.GIF -> 324.dp
                 OverlayElementId.TIME -> 290.dp
-                OverlayElementId.BATTERY -> 220.dp
+                OverlayElementId.BATTERY -> 300.dp
                 else -> 100.dp
             }
             val useWeatherColors = (expandedId == OverlayElementId.WEATHER && isWeatherImmersive)
@@ -436,6 +452,8 @@ fun status_bar_overlay(
                 pillScale = expandedEntry?.pillScale ?: 1f,
                 backdropType = expandedEntry?.backdropType ?: -1,
                 fillAlpha = surfaceAlpha,
+                solarBrightness = solarBrightness,
+                clearWayheadProgress = clearWayheadProgress,
                 onClose = { if (editor == null) AccessibilityOverlayService.expandedElementFlow.value = null else localExpandedId = null },
                 onTransitionFinished = {
                     if (!morphIsActive) {
@@ -460,7 +478,7 @@ fun status_bar_overlay(
                 if (cardProgress < 0.32f) {
                     Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 1f - (cardProgress / 0.32f) }, contentAlignment = Alignment.Center) {
                         when (expandedId) {
-                            OverlayElementId.WEATHER -> weather_module(config.weatherSettings, config.weatherMode, contentColor, config.fontScale * 0.9f, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, config.weatherCode, weatherRefreshInFlight, config.weatherFetchedAt)
+                            OverlayElementId.WEATHER -> weather_module(config.weatherSettings, config.weatherMode, contentColor, config.fontScale * 0.9f, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, liveDisplayCode, weatherRefreshInFlight, config.weatherFetchedAt)
                             OverlayElementId.TIME    -> time_module(timeStr, config.resolvedTimeSettings, contentColor, config.fontScale * 0.9f, selected_font_family)
                             OverlayElementId.BATTERY -> battery_module(battery_snapshot.level, battery_snapshot.charging, config.resolvedBatterySettings, contentColor, config.fontScale * 0.9f, selected_font_family)
                             else -> {}
@@ -541,6 +559,8 @@ fun status_bar_overlay(
                     fill = lane_fill,
                     stroke = lane_border,
                     fillAlpha = 0.97f,
+                    solarBrightness = solarBrightness,
+                    clearWayheadProgress = clearWayheadProgress,
                     onClose = {},
                     onTransitionFinished = {}
                 ) { _, _ -> }
@@ -561,6 +581,8 @@ private fun MorphingSurface(
     pillScale: Float = 1f,
     backdropType: Int = -1,
     fillAlpha: Float = 0.97f,
+    solarBrightness: Float = 1f,
+    clearWayheadProgress: Float = 0.5f,
     onClose: () -> Unit,
     onTransitionFinished: () -> Unit = {},
     pillContent: (@Composable () -> Unit)? = null,
@@ -598,7 +620,7 @@ private fun MorphingSurface(
 
     val resolvedTargetWidth = targetWidth ?: (screenWidthDp - 36.dp)
     val targetX = ((screenWidthDp - resolvedTargetWidth) / 2f).coerceAtLeast(18.dp)
-    val targetY = 35.dp
+    val targetY = 30.dp
 
     val pillLeft = with(density) { sourceRect.left.toDp() }
     val pillRight = with(density) { sourceRect.right.toDp() }
@@ -606,16 +628,14 @@ private fun MorphingSurface(
     val pillBottom = with(density) { sourceRect.bottom.toDp() }
     val sourcePillWidth = (pillRight - pillLeft).coerceAtLeast(0.dp)
     val sourcePillHeight = (pillBottom - pillTop).coerceAtLeast(0.dp)
-    val pillWidth = sourcePillWidth + (20.dp * pillScale)
+    val pillWidth = (sourcePillWidth + (10.dp * pillScale)).coerceAtMost(resolvedTargetWidth * 0.48f)
     val pillHeight = (24.dp * pillScale).coerceAtLeast(sourcePillHeight * 0.92f)
     val pillCenterX = pillLeft + (sourcePillWidth / 2f)
     val pillCenterY = pillTop + (sourcePillHeight / 2f)
-    val centeredPillLeft = targetX + ((resolvedTargetWidth - pillWidth) / 2f)
-    val centeredPillTop = targetY + ((targetHeight - pillHeight) / 2f)
     val travelingPhase = (animProgress / 0.72f).coerceIn(0f, 1f)
     val cardProgress = ((animProgress - 0.30f) / 0.70f).coerceIn(0f, 1f)
     val shellMorphProgress = ((travelingPhase - 0.12f) / 0.88f).coerceIn(0f, 1f)
-    val travelingPillWidth = lerpDp(pillWidth, resolvedTargetWidth * 0.86f, shellMorphProgress)
+    val travelingPillWidth = lerpDp(pillWidth, resolvedTargetWidth * 0.54f, shellMorphProgress)
     val travelingPillHeight = lerpDp(pillHeight, targetHeight * 0.72f, shellMorphProgress)
     val travelingPillCenterX = lerpDp(pillCenterX, targetX + (resolvedTargetWidth / 2f), travelingPhase)
     val travelingPillCenterY = lerpDp(pillCenterY, targetY + (targetHeight / 2f), travelingPhase)
@@ -627,7 +647,11 @@ private fun MorphingSurface(
         animProgress < 0.62f -> 1f
         else -> ((0.92f - animProgress) / 0.30f).coerceIn(0f, 1f)
     }
-    val travelingPillContentAlpha = ((0.34f - animProgress) / 0.22f).coerceIn(0f, 1f)
+    val travelingPillContentAlpha = if (active) {
+        ((0.74f - animProgress) / 0.28f).coerceIn(0f, 1f)
+    } else {
+        ((0.34f - animProgress) / 0.24f).coerceIn(0f, 1f)
+    }
     val travelingCorner = lerpDp(pillHeight / 2f, 32.dp, shellMorphProgress * 0.92f)
     val currentCorner = lerpDp(travelingPillHeight / 2f, 32.dp, cardProgress)
 
@@ -658,6 +682,24 @@ private fun MorphingSurface(
                 .border(1.5.dp, stroke, RoundedCornerShape(travelingCorner)),
             contentAlignment = Alignment.Center
         ) {
+            if (backdropType != -1) {
+                Box(
+                    modifier = Modifier
+                        .size(pillWidth, pillHeight)
+                        .graphicsLayer { alpha = travelingPillContentAlpha }
+                        .clip(RoundedCornerShape(pillHeight / 2f))
+                        .drawBehind {
+                            when (backdropType) {
+                                WEATHER_BACKDROP_CLOUDY  -> draw_cloud_bunches(clear_wayhead_progress = clearWayheadProgress)
+                                WEATHER_BACKDROP_SUNNY   -> draw_sunny_glow(solarBrightness, clearWayheadProgress)
+                                WEATHER_BACKDROP_RAINY   -> draw_rain_streaks()
+                                WEATHER_BACKDROP_SNOWY   -> draw_snow_crystals()
+                                WEATHER_BACKDROP_THUNDER -> draw_thunder_bolt()
+                                WEATHER_BACKDROP_WINDY   -> draw_wind_streaks()
+                            }
+                        }
+                )
+            }
             Box(modifier = Modifier.graphicsLayer { alpha = travelingPillContentAlpha }) {
                 pillContent()
             }

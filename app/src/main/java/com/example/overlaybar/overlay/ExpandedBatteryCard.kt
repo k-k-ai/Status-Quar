@@ -54,7 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-private const val BATTERY_INSIGHTS_VISIBLE = 4
+private const val BATTERY_INSIGHTS_VISIBLE = 8
 
 
 /// Functions
@@ -69,6 +69,8 @@ internal fun expanded_battery_card(
 ) {
     val level_color = battery_level_color(battery_snapshot.level, battery_snapshot.charging, battery_snapshot.full)
     val dim = text_color.copy(alpha = 0.56f)
+    val resolved_remaining = battery_snapshot.displayed_mah_remaining
+    val resolved_runtime_minutes = if (battery_snapshot.charging) battery_snapshot.time_to_full_minutes else battery_snapshot.time_remaining_minutes
 
     Column(
         modifier = Modifier
@@ -102,6 +104,15 @@ internal fun expanded_battery_card(
                         letterSpacing = 0.sp
                     )
                 }
+            } else if (battery_snapshot.full) {
+                Text(
+                    "Charged",
+                    color = level_color.copy(alpha = 0.85f),
+                    fontSize = (11f * font_scale).sp,
+                    fontFamily = font_family,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.sp
+                )
             }
         }
 
@@ -152,7 +163,15 @@ internal fun expanded_battery_card(
         Spacer(Modifier.height(10.dp))
 
         // Primary stats row
-        primary_stats_row(battery_snapshot, text_color, dim, font_family, font_scale)
+        primary_stats_row(
+            battery = battery_snapshot,
+            resolved_remaining_mah = resolved_remaining,
+            resolved_runtime_minutes = resolved_runtime_minutes,
+            text_color = text_color,
+            dim = dim,
+            fontFamily = font_family,
+            fontScale = font_scale
+        )
 
         Spacer(Modifier.height(10.dp))
 
@@ -164,24 +183,32 @@ internal fun expanded_battery_card(
 @Composable
 private fun primary_stats_row(
     battery: BatterySnapshot,
+    resolved_remaining_mah: Int?,
+    resolved_runtime_minutes: Int?,
     text_color: Color,
     dim: Color,
     fontFamily: FontFamily,
     fontScale: Float
 ) {
-    val mah_text = battery.mah_remaining?.let { "${format_mah(it)} mAh" } ?: "—"
+    val mah_text = resolved_remaining_mah?.let { "${format_mah(it)} mAh" } ?: "—"
     val rate_ma  = if (battery.charging) battery.charge_ma else battery.drain_ma
-    val rate_text = if (rate_ma != null) {
-        val arrow = if (battery.charging) "↑" else "↓"
-        "$arrow ${format_mah(rate_ma)}mA"
-    } else "—"
+    val rate_text = when {
+        rate_ma != null -> {
+            val arrow = if (battery.charging) "↑" else "↓"
+            "$arrow ${format_mah(rate_ma)}mA"
+        }
+        battery.session_percent_per_hour != null -> {
+            val arrow = if (battery.charging) "↑" else "↓"
+            "$arrow ${battery.session_percent_per_hour}%/h"
+        }
+        else -> "—"
+    }
     val rate_label = when {
         battery.full -> "full"
         battery.charging -> "charging"
         else -> "draining"
     }
-    val time_minutes = if (battery.charging) battery.time_to_full_minutes else battery.time_remaining_minutes
-    val time_text = time_minutes?.let { format_duration_minutes(it) } ?: "—"
+    val time_text = resolved_runtime_minutes?.let { format_duration_minutes(it) } ?: "—"
     val time_label = when {
         battery.full -> "charged"
         battery.charging -> "to full"
@@ -558,11 +585,11 @@ private fun DrawScope.draw_level_change(color: Color) {
 } // draw_level_change
 
 internal fun battery_level_color(level: Int, charging: Boolean, full: Boolean = false): Color = when {
-    full        -> Color(0xFF30D158)
+    full || level >= 100 -> Color(0xFF4DA3FF)
     charging    -> Color(0xFF34C759)
-    level <= 10 -> Color(0xFFFF453A)
-    level <= 20 -> Color(0xFFFF9F0A)
-    else        -> Color(0xFF8E8E93)
+    level <= 15 -> Color(0xFFFF453A)
+    level <= 45 -> Color(0xFFFFC857)
+    else        -> Color(0xFF34C759)
 }
 
 

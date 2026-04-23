@@ -10,6 +10,7 @@ package com.example.overlaybar.overlay
 
 import android.os.BatteryManager
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import java.util.Locale
 
 data class BatterySnapshot(
@@ -48,6 +49,21 @@ data class BatterySnapshot(
     }
 
     val resolved_full_mah: Int? get() = full_mah ?: learned_full_mah
+
+    val displayed_total_mah: Int? get() = estimated_total_mah ?: resolved_full_mah ?: design_mah
+
+    val displayed_mah_remaining: Int? get() {
+        mah_remaining?.let { return it }
+        val total = displayed_total_mah ?: return null
+        return ((total * level.coerceIn(0, 100)) / 100f).roundToInt().coerceIn(0, total)
+    }
+
+    val session_percent_per_hour: Int? get() {
+        val delta = session_delta_level ?: return null
+        val minutes = session_duration_minutes ?: return null
+        if (delta <= 0 || minutes < 3) return null
+        return ((delta * 60f) / minutes).roundToInt().coerceAtLeast(1)
+    }
 
     val learned_health_percent: Int? get() {
         if (learned_full_mah == null || design_mah == null || design_mah <= 0) return null
@@ -89,21 +105,30 @@ data class BatterySnapshot(
 
     val time_to_full_minutes: Int? get() {
         if (!charging || full) return null
-        val mah = mah_remaining ?: return null
-        val total = estimated_total_mah ?: return null
-        val rate = charge_ma ?: return null
-        if (rate <= 0) return null
-        val toFull = total - mah
-        if (toFull <= 0) return null
-        return (toFull * 60L / rate).toInt().coerceAtLeast(1)
+        val total = displayed_total_mah
+        val remaining = displayed_mah_remaining
+        val rate = charge_ma
+        if (total != null && remaining != null && rate != null && rate > 0) {
+            val toFull = total - remaining
+            if (toFull > 0) return (toFull * 60L / rate).toInt().coerceAtLeast(1)
+        }
+        val percentRate = session_percent_per_hour ?: return null
+        val percentToFull = (100 - level).coerceAtLeast(0)
+        if (percentToFull <= 0) return null
+        return ((percentToFull * 60f) / percentRate).roundToInt().coerceAtLeast(1)
     }
 
     val time_remaining_minutes: Int? get() {
         if (charging) return null
-        val mah = mah_remaining ?: return null
-        val rate = drain_ma ?: return null
-        if (rate <= 0) return null
-        return (mah * 60L / rate).toInt().coerceAtLeast(1)
+        val remaining = displayed_mah_remaining
+        val rate = drain_ma
+        if (remaining != null && rate != null && rate > 0) {
+            return (remaining * 60L / rate).toInt().coerceAtLeast(1)
+        }
+        val percentRate = session_percent_per_hour ?: return null
+        val percentRemaining = level.coerceAtLeast(0)
+        if (percentRemaining <= 0) return null
+        return ((percentRemaining * 60f) / percentRate).roundToInt().coerceAtLeast(1)
     }
 
     val plug_label: String get() = when (plug_type) {
@@ -188,6 +213,23 @@ internal fun compute_battery_insights(battery: BatterySnapshot): List<BatteryIns
         )
     }
 
+    battery.displayed_mah_remaining?.let { remainingMah ->
+        list += BatteryInsight(
+            InsightKind.CAPACITY,
+            "${format_mah(remainingMah)} mAh",
+            if (battery.charging) "charge currently stored" else "energy remaining"
+        )
+    }
+
+    val runtimeMinutes = if (battery.charging) battery.time_to_full_minutes else battery.time_remaining_minutes
+    if (runtimeMinutes != null) {
+        list += BatteryInsight(
+            InsightKind.RATE,
+            format_duration_minutes(runtimeMinutes),
+            if (battery.charging) "until full" else "estimated runtime"
+        )
+    }
+
     // Level delta this session
     if (battery.session_delta_level != null && abs(battery.session_delta_level) >= 2) {
         val dur = battery.session_duration_minutes
@@ -217,6 +259,12 @@ internal fun compute_battery_insights(battery: BatterySnapshot): List<BatteryIns
             "${format_mah(cap)} mAh",
             "estimated full charge capacity$sampleLabel"
         )
+    } ?: battery.design_mah?.let { cap ->
+        list += BatteryInsight(
+            InsightKind.CAPACITY,
+            "${format_mah(cap)} mAh",
+            "rated design capacity"
+        )
     }
 
     val health_source = battery.health_source
@@ -227,14 +275,31 @@ internal fun compute_battery_insights(battery: BatterySnapshot): List<BatteryIns
             "$healthValue%",
             if (health_source == "estimated health") "estimated health" else "battery health"
         )
+    } else if (battery.learned_sample_count in 1..2) {
+        val sampleCount = battery.learned_sample_count
+        list += BatteryInsight(
+            InsightKind.CAPACITY,
+            "Learning health",
+            "$sampleCount capacity sample${if (sampleCount == 1) "" else "s"} captured"
+        )
     }
+
+    battery.design_mah
+        ?.takeIf { battery.full_mah != null || battery.learned_full_mah != null }
+        ?.let { designMah ->
+            list += BatteryInsight(
+                InsightKind.CAPACITY,
+                "${format_mah(designMah)} mAh",
+                "rated design capacity"
+            )
+        }
 
     // Cycles
     battery.cycles?.let { c ->
         list += BatteryInsight(
             InsightKind.CAPACITY,
             format_cycle_count(c),
-            "battery cycles"
+            battery.cycle_source ?: "battery cycles"
         )
     }
 
@@ -290,6 +355,15 @@ internal fun compute_battery_insights(battery: BatterySnapshot): List<BatteryIns
             "$arrow ${format_mah(rate_ma)} mA",
             if (battery.charging) "charging" else "discharging"
         )
+    } else {
+        battery.session_percent_per_hour?.let { percentPerHour ->
+            val arrow = if (battery.charging) "↑" else "↓"
+            list += BatteryInsight(
+                InsightKind.RATE,
+                "$arrow $percentPerHour%/h",
+                if (battery.charging) "charging pace" else "drain pace"
+            )
+        }
     }
 
     return list

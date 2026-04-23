@@ -110,7 +110,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         val batterySnapshotFlow = MutableStateFlow(BatterySnapshot())
 
         private const val OVERLAY_FADE_HEIGHT_DP = 52
-        private const val TOUCH_EDGE_GESTURE_GUTTER_DP = 24
+        private const val TOUCH_EDGE_GESTURE_GUTTER_DP = 8
         private const val TIMER_ALARM_ACTION  = "com.example.overlaybar.TIMER_EXPIRED"
         private const val TIMER_ALARM_REQUEST = 0x74696D65 // "time"
         private const val MAX_LEARNED_CAPACITY_SAMPLES = 18
@@ -591,10 +591,12 @@ class AccessibilityOverlayService : AccessibilityService() {
         val view = overlayView ?: return
         val lp = overlayLayoutParams ?: return
         val screenHeight = resources.displayMetrics.heightPixels
+        val hasVisibleExpansionSurface = expandedElementFlow.value != null || expandedCardBoundsFlow.value != null
         
-        // If not expanded, make it small height to avoid blocking swipes.
-        if (expandedElementFlow.value == null) {
-            lp.height = (80 * resources.displayMetrics.density).toInt()
+        // Keep the taller overlay alive until the morph surface has fully cleared,
+        // otherwise the exit transition gets clipped as soon as expansion state flips null.
+        if (!hasVisibleExpansionSurface) {
+            lp.height = (132 * resources.displayMetrics.density).toInt()
         } else {
             lp.height = (screenHeight * 0.75f).toInt()
         }
@@ -870,7 +872,10 @@ class AccessibilityOverlayService : AccessibilityService() {
         val tempF = current.optJSONObject("temperature")?.optFloat("degrees") ?: return null
         val windMph = current.optJSONObject("wind")?.optJSONObject("speed")?.optFloat("value") ?: return null
         val gustMph = current.optJSONObject("wind")?.optJSONObject("gust")?.optFloat("value")?.takeIf { it > 0f }
-        val code = google_condition_to_code(current.optJSONObject("weatherCondition")?.optString("type").orEmpty())
+        val code = google_condition_to_code(
+            current.optJSONObject("weatherCondition")?.optString("type").orEmpty(),
+            tempF
+        )
 
         val hourlyJson = JSONObject(read_json("$baseUrl/forecast/hours:lookup?$query&pageSize=24"))
         val hours = hourlyJson.optJSONArray("forecastHours")
@@ -879,11 +884,13 @@ class AccessibilityOverlayService : AccessibilityService() {
         val hourlyWinds = mutableListOf<String>()
         for (i in 0 until minOf(hours?.length() ?: 0, 24)) {
             val hour = hours?.optJSONObject(i) ?: continue
-            hour.optJSONObject("temperature")?.optFloat("degrees")?.let { degrees ->
+            val hourTempF = hour.optJSONObject("temperature")?.optFloat("degrees")
+            hourTempF?.let { degrees ->
                 hourlyTemps += degrees.toString()
             }
             hourlyCodes += google_condition_to_code(
-                hour.optJSONObject("weatherCondition")?.optString("type").orEmpty()
+                hour.optJSONObject("weatherCondition")?.optString("type").orEmpty(),
+                hourTempF
             ).toString()
             hour.optJSONObject("wind")?.optJSONObject("speed")?.optFloat("value")?.let { mph ->
                 hourlyWinds += mph.toString()
@@ -932,7 +939,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         val currentSummary = bestObservation?.summary?.ifBlank {
             firstHourly?.optString("shortForecast").orEmpty()
         } ?: firstHourly?.optString("shortForecast").orEmpty()
-        val currentCode = description_to_code(currentSummary)
+        val currentCode = description_to_code(currentSummary, null, tempF)
 
         val hourlyTemps = mutableListOf<Float>()
         val hourlyCodes = mutableListOf<Int>()
@@ -1159,11 +1166,12 @@ class AccessibilityOverlayService : AccessibilityService() {
         return 0
     }
 
-    private fun google_condition_to_code(type: String): Int {
+    private fun google_condition_to_code(type: String, tempF: Float? = null): Int {
         val normalized = type.lowercase(Locale.US)
         return when {
             "thunder" in normalized || "storm" in normalized -> 95
-            "snow" in normalized || "flurr" in normalized || "blizzard" in normalized -> 71
+            "flurr" in normalized -> if ((tempF ?: Float.NEGATIVE_INFINITY) >= 34f) 77 else 85
+            "snow" in normalized || "blizzard" in normalized -> if ((tempF ?: Float.NEGATIVE_INFINITY) >= 34f) 77 else 71
             "sleet" in normalized || "ice" in normalized || "hail" in normalized || "freezing" in normalized -> 77
             "shower" in normalized -> 80
             "rain" in normalized || "drizzle" in normalized -> 61
@@ -1178,15 +1186,16 @@ class AccessibilityOverlayService : AccessibilityService() {
     }
 
     private fun description_to_code(description: String): Int {
-        return description_to_code(description, null)
+        return description_to_code(description, null, null)
     }
 
-    private fun description_to_code(description: String, precipChancePercent: Int?): Int {
+    private fun description_to_code(description: String, precipChancePercent: Int?, tempF: Float? = null): Int {
         val normalized = description.lowercase(Locale.US)
         val precipChance = precipChancePercent ?: 100
         return when {
             "thunder" in normalized || "storm" in normalized -> 95
-            "snow" in normalized || "flurr" in normalized || "blizzard" in normalized -> 71
+            "flurr" in normalized -> if ((tempF ?: Float.NEGATIVE_INFINITY) >= 34f) 77 else 85
+            "snow" in normalized || "blizzard" in normalized -> if ((tempF ?: Float.NEGATIVE_INFINITY) >= 34f) 77 else 71
             "sleet" in normalized || "ice pellets" in normalized || "hail" in normalized || "freezing rain" in normalized || "wintry mix" in normalized -> 77
             "showers" in normalized && precipChance >= 45 -> 80
             ("rain" in normalized || "drizzle" in normalized) && precipChance >= 35 -> 61
@@ -1205,7 +1214,8 @@ class AccessibilityOverlayService : AccessibilityService() {
         val chance = period.optJSONObject("probabilityOfPrecipitation")
             ?.optDoubleOrNull("value")
             ?.toInt()
-        return description_to_code(period.optString("shortForecast"), chance)
+        val tempF = period_temperature_to_fahrenheit(period)
+        return description_to_code(period.optString("shortForecast"), chance, tempF)
     }
 
     private fun bias_correct_hourly_temps(values: List<Float>, currentTempF: Float): List<Float> {
@@ -1246,19 +1256,37 @@ class AccessibilityOverlayService : AccessibilityService() {
         }
     }
 
+    private fun normalize_wintry_code_for_temp(code: Int, tempF: Float?): Int {
+        val temp = tempF ?: return code
+        return when {
+            code in setOf(71, 73, 75) && temp >= 34f -> 77
+            code in setOf(71, 73, 75) && temp >= 32.5f -> 85
+            code in setOf(85, 86) && temp >= 34f -> 77
+            else -> code
+        }
+    }
+
     private fun reconcile_weather_snapshot(snapshot: WeatherSnapshot): WeatherSnapshot {
         val hourlyCodes = snapshot.hourlyCodes
             .split(",")
             .mapNotNull { it.trim().toIntOrNull() }
         if (hourlyCodes.isEmpty()) return snapshot
+        val hourlyTemps = snapshot.hourlyTemps
+            .split(",")
+            .mapNotNull { it.trim().toFloatOrNull() }
 
+        val normalizedHourly = hourlyCodes.mapIndexed { index, code ->
+            normalize_wintry_code_for_temp(code, hourlyTemps.getOrNull(index))
+        }
+        val normalizedCurrent = normalize_wintry_code_for_temp(snapshot.code, snapshot.tempF)
         val correctedCurrent = reconcile_current_code(
-            currentCode = snapshot.code,
-            hourlyCodes = hourlyCodes,
+            currentCode = normalizedCurrent,
+            currentTempF = snapshot.tempF,
+            hourlyCodes = normalizedHourly,
             sourceCurrentCode = snapshot.sourceCurrentCode,
             sourceCurrentSummary = snapshot.sourceCurrentSummary
         )
-        val correctedHourly = stabilize_hourly_codes(hourlyCodes, correctedCurrent)
+        val correctedHourly = stabilize_hourly_codes(normalizedHourly, correctedCurrent)
         return snapshot.copy(
             code = correctedCurrent,
             hourlyCodes = correctedHourly.joinToString(",")
@@ -1267,6 +1295,7 @@ class AccessibilityOverlayService : AccessibilityService() {
 
     private fun reconcile_current_code(
         currentCode: Int,
+        currentTempF: Float,
         hourlyCodes: List<Int>,
         sourceCurrentCode: Int?,
         sourceCurrentSummary: String?
@@ -1276,6 +1305,13 @@ class AccessibilityOverlayService : AccessibilityService() {
 
         if (currentCode == 45 && firstHourly != 45) {
             return firstHourly
+        }
+
+        if (is_wintry_code(currentCode) && currentTempF >= 34f) {
+            val nearby = hourlyCodes.take(2)
+            val nearbyWintryCount = nearby.count(::is_wintry_code)
+            if (nearbyWintryCount == 0) return firstHourly
+            if (currentCode in setOf(71, 73, 75) && nearbyWintryCount == 1) return 77
         }
 
         val imminentWet = firstHourly in setOf(61, 80, 95) && secondHourly in setOf(61, 80, 95)
@@ -1320,8 +1356,12 @@ class AccessibilityOverlayService : AccessibilityService() {
 
     private fun update_touch_windows(regions: Map<OverlayElementId, android.graphics.Rect>, expandedId: OverlayElementId?) {
         val wm = wm ?: return
-        val touchRects = regions.mapValues { (id, rect) ->
-            android.graphics.Rect(rect)
+        val touchPaddingXPx = (10 * resources.displayMetrics.density).toInt()
+        val touchPaddingYPx = (8 * resources.displayMetrics.density).toInt()
+        val touchRects = regions.mapValues { (_, rect) ->
+            android.graphics.Rect(rect).apply {
+                inset(-touchPaddingXPx, -touchPaddingYPx)
+            }
         }
 
         if (touchRects.isEmpty()) {
@@ -1499,7 +1539,7 @@ class AccessibilityOverlayService : AccessibilityService() {
                 adjusted.right = screenWidth - edgeGestureGutterPx
             }
             // Top exclusion for status bar swipe down
-            val topGutterPx = (4 * resources.displayMetrics.density).toInt()
+            val topGutterPx = resources.displayMetrics.density.toInt().coerceAtLeast(1)
             if (adjusted.top <= topGutterPx) {
                 adjusted.top = topGutterPx
             }
