@@ -349,6 +349,12 @@ fun status_bar_overlay(
     }.sortedBy { it.order }
     val lane_entries = remember(left_elements, right_elements) { left_elements + right_elements }
 
+    // Clear elementBoundsMap of entries that are no longer visible to prevent ghost taps.
+    val visibleIds = remember(lane_entries) { lane_entries.map { it.id }.toSet() }
+    LaunchedEffect(visibleIds) {
+        elementBoundsMap = elementBoundsMap.filterKeys { it in visibleIds }
+    }
+
     // Logic to update global interactive regions
     LaunchedEffect(elementBoundsMap) {
         if (editor == null) {
@@ -382,12 +388,12 @@ fun status_bar_overlay(
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
         Box(modifier = Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.TopStart) {
-            // Status bar pills
-            Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                overlay_lane(left_elements, true, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, VERTICAL_TRIM_BASELINE_DP + config.leftVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
+            // Status bar pills - use TopCenter to avoid vertical centering shifts on expand
+            Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.TopCenter) {
+                overlay_lane(left_elements, true, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, 42 + config.leftVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
                     elementBoundsMap = elementBoundsMap + (id to rect)
                 }
-                overlay_lane(right_elements, false, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, VERTICAL_TRIM_BASELINE_DP + config.rightVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
+                overlay_lane(right_elements, false, config.elementPaddingDp, lane_fill, lane_border, config.mergedLanes, text_color, 42 + config.rightVerticalOffsetDp, solarBrightness, clearWayheadProgress) { id, rect ->
                     elementBoundsMap = elementBoundsMap + (id to rect)
                 }
             }
@@ -405,7 +411,7 @@ fun status_bar_overlay(
                 OverlayElementId.WEATHER -> 186.dp
                 OverlayElementId.GIF -> 324.dp
                 OverlayElementId.TIME -> 290.dp
-                OverlayElementId.BATTERY -> 195.dp
+                OverlayElementId.BATTERY -> 220.dp
                 else -> 100.dp
             }
             val useWeatherColors = (expandedId == OverlayElementId.WEATHER && isWeatherImmersive)
@@ -495,10 +501,10 @@ fun status_bar_overlay(
                                     fontFamily = selected_font_family,
                                     fontScale = config.fontScale,
                                     use_24_hour_time = config.use24HourTime,
-                                    onAddEightMinuteTimer = { adjust_timer_duration_by(currentTimeMillis.value, activeTimerEndMillis, timerSetAt, 8 * 60 * 1000L) },
-                                    onSubtractEightMinuteTimer = { adjust_timer_duration_by(currentTimeMillis.value, activeTimerEndMillis, timerSetAt, -8 * 60 * 1000L) },
-                                    onAddTenMinuteTimer = { adjust_timer_duration_by(currentTimeMillis.value, activeTimerEndMillis, timerSetAt, 10 * 60 * 1000L) },
-                                    onSubtractTenMinuteTimer = { adjust_timer_duration_by(currentTimeMillis.value, activeTimerEndMillis, timerSetAt, -10 * 60 * 1000L) }
+                                    onAddEightMinuteTimer = { adjust_timer_duration_by(System.currentTimeMillis(), activeTimerEndMillis, timerSetAt, 8 * 60 * 1000L) },
+                                    onSubtractEightMinuteTimer = { adjust_timer_duration_by(System.currentTimeMillis(), activeTimerEndMillis, timerSetAt, -8 * 60 * 1000L) },
+                                    onAddTenMinuteTimer = { adjust_timer_duration_by(System.currentTimeMillis(), activeTimerEndMillis, timerSetAt, 10 * 60 * 1000L) },
+                                    onSubtractTenMinuteTimer = { adjust_timer_duration_by(System.currentTimeMillis(), activeTimerEndMillis, timerSetAt, -10 * 60 * 1000L) }
                                 )
                             }
                             OverlayElementId.GIF -> {

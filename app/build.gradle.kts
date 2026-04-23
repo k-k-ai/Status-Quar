@@ -51,9 +51,10 @@ fun readGitCommitCount(rootDir: java.io.File): Int? {
     }
 }
 
-val versionCommit = readGitCommitCount(rootProject.rootDir)
-    ?: versionProperties.getProperty("commit")?.toIntOrNull()
-    ?: 0
+val rawCommitCount = readGitCommitCount(rootProject.rootDir)
+val versionCommitOffset = versionProperties.getProperty("commitOffset")?.toIntOrNull() ?: 0
+val versionCommit = ((rawCommitCount ?: versionProperties.getProperty("commit")?.toIntOrNull() ?: 0) + versionCommitOffset)
+    .coerceAtLeast(1)
 val previousBuildNumber = versionProperties.getProperty("build")?.toIntOrNull() ?: 0
 val versionBuildNumber = if (shouldIncrementBuildNumber()) previousBuildNumber + 1 else previousBuildNumber
 val buildHigh = versionBuildNumber / 100
@@ -66,8 +67,13 @@ val generatedVersionCode = (versionCommit * 10_000L + versionBuildNumber)
 if (versionBuildNumber != previousBuildNumber || versionProperties.getProperty("commit") != versionCommit.toString()) {
     versionProperties["commit"] = versionCommit.toString()
     versionProperties["build"] = versionBuildNumber.toString()
+    val offsetLine = if (versionCommitOffset != 0) {
+        "commitOffset=$versionCommitOffset${System.lineSeparator()}"
+    } else {
+        ""
+    }
     versionPropertiesFile.writeText(
-        "commit=$versionCommit${System.lineSeparator()}build=$versionBuildNumber${System.lineSeparator()}"
+        "commit=$versionCommit${System.lineSeparator()}build=$versionBuildNumber${System.lineSeparator()}$offsetLine"
     )
 }
 

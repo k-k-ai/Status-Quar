@@ -14,6 +14,7 @@ import android.graphics.PixelFormat
 import android.location.LocationManager
 import android.os.Build
 import android.os.BatteryManager
+import android.os.PowerManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -47,6 +48,7 @@ import com.example.overlaybar.data.*
 import com.example.overlaybar.data.OverlayElementId
 import com.example.overlaybar.data.OverlaySettingsSnapshot
 import com.example.overlaybar.data.Prefs
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
@@ -68,6 +70,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.coroutines.resume
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class AccessibilityOverlayService : AccessibilityService() {
 
@@ -80,7 +84,9 @@ class AccessibilityOverlayService : AccessibilityService() {
         val code: Int,
         val hourlyTemps: String,
         val hourlyCodes: String,
-        val hourlyWindsMph: String
+        val hourlyWindsMph: String,
+        val sourceCurrentCode: Int? = null,
+        val sourceCurrentSummary: String? = null
     )
 
     private data class StationObservationCandidate(
@@ -107,6 +113,10 @@ class AccessibilityOverlayService : AccessibilityService() {
         private const val TOUCH_EDGE_GESTURE_GUTTER_DP = 24
         private const val TIMER_ALARM_ACTION  = "com.example.overlaybar.TIMER_EXPIRED"
         private const val TIMER_ALARM_REQUEST = 0x74696D65 // "time"
+        private const val MAX_LEARNED_CAPACITY_SAMPLES = 18
+        private const val MIN_LEARNED_CAPACITY_SAMPLES_TO_SURFACE = 3
+        private const val MIN_LEARNED_CAPACITY_DELTA_LEVEL = 15
+        private const val MIN_LEARNED_CAPACITY_DELTA_MAH = 150
         
         // Modular expansion system:
         // 1. BarUi reports screen bounds for all interactive pills here
@@ -178,6 +188,16 @@ class AccessibilityOverlayService : AccessibilityService() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
+    private var batteryManualCycles = 0f
+    private var learnedCapacitySamples: List<Int> = emptyList()
+    private var activeBatterySessionStartLevel: Int? = null
+    private var activeBatterySessionStartMah: Int? = null
+    private var activeBatterySessionStartAtMillis: Long? = null
+    private var activeBatterySessionCharging: Boolean? = null
+    private var sysfsDesignMah: Int? = null
+    private var sysfsFullMah: Int? = null
+    private var sysfsCycleCount: Int? = null
+
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             intent ?: return
@@ -197,6 +217,35 @@ class AccessibilityOverlayService : AccessibilityService() {
 
             val currentLevel = if (level >= 0 && scale > 0) (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100) else 100
             val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+            val now = System.currentTimeMillis()
+            refresh_cached_battery_capabilities()
+            val previousSessionCharging = activeBatterySessionCharging
+            if (previousSessionCharging == null) {
+                start_battery_session(currentLevel, mahRemaining, now, isCharging)
+            } else if (previousSessionCharging != isCharging) {
+                finalize_battery_session(currentLevel, mahRemaining)
+                start_battery_session(currentLevel, mahRemaining, now, isCharging)
+            }
+
+            val sessionDeltaLevel = activeBatterySessionStartLevel
+                ?.let { abs(currentLevel - it) }
+                ?.takeIf { it >= 1 }
+            val sessionDeltaMah = activeBatterySessionStartMah
+                ?.let { startMah -> mahRemaining?.let { abs(it - startMah) } }
+                ?.takeIf { it > 20 }
+            val sessionDurationMinutes = activeBatterySessionStartAtMillis
+                ?.let { ((now - it) / 60_000L).toInt().coerceAtLeast(0) }
+                ?.takeIf { it > 0 }
+            val learnedFullMah = compute_learned_capacity_estimate(learnedCapacitySamples)
+            val directCycles = sysfsCycleCount?.takeIf { it > 0 }?.toFloat()
+            val manualCycles = batteryManualCycles.takeIf { it >= 1f }
+            val cycleValue = directCycles ?: manualCycles
+            val cycleSource = when {
+                directCycles != null -> "device reported cycles"
+                manualCycles != null -> "recorded charge cycles"
+                else -> null
+            }
+            val powerSave = (getSystemService(POWER_SERVICE) as? PowerManager)?.isPowerSaveMode == true
 
             batterySnapshotFlow.value = batterySnapshotFlow.value.copy(
                 level = currentLevel,
@@ -205,7 +254,19 @@ class AccessibilityOverlayService : AccessibilityService() {
                 plug_type = plugType,
                 temperature_c = temperature,
                 mah_remaining = mahRemaining,
-                current_ma = currentMa
+                current_ma = currentMa,
+                power_save = powerSave,
+                design_mah = sysfsDesignMah,
+                full_mah = sysfsFullMah,
+                learned_full_mah = learnedFullMah,
+                learned_sample_count = learnedCapacitySamples.size,
+                direct_health = null,
+                cycles = cycleValue,
+                cycle_source = cycleSource,
+                session_delta_mah = sessionDeltaMah,
+                session_delta_level = sessionDeltaLevel,
+                session_duration_minutes = sessionDurationMinutes,
+                session_charging = isCharging
             )
         }
     }
@@ -214,6 +275,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         super.onServiceConnected()
         prefs = Prefs(this)
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        scope.launch { hydrate_battery_recovery_state() }
         register_battery_receiver_if_needed()
         register_timer_alarm_receiver()
         start_compass_updates()
@@ -324,6 +386,153 @@ class AccessibilityOverlayService : AccessibilityService() {
         if (delta < -180f) delta += 360f
         return delta
     }
+
+    private suspend fun hydrate_battery_recovery_state() {
+        batteryManualCycles = prefs.battery_manual_cycles.first().coerceAtLeast(0f)
+        learnedCapacitySamples = decode_capacity_samples(prefs.battery_learned_capacity_samples.first())
+        refresh_cached_battery_capabilities()
+        val directCycles = sysfsCycleCount?.takeIf { it > 0 }?.toFloat()
+        val manualCycles = batteryManualCycles.takeIf { it >= 1f }
+        batterySnapshotFlow.value = batterySnapshotFlow.value.copy(
+            design_mah = sysfsDesignMah,
+            full_mah = sysfsFullMah,
+            learned_full_mah = compute_learned_capacity_estimate(learnedCapacitySamples),
+            learned_sample_count = learnedCapacitySamples.size,
+            cycles = directCycles ?: manualCycles,
+            cycle_source = when {
+                directCycles != null -> "device reported cycles"
+                manualCycles != null -> "recorded charge cycles"
+                else -> null
+            }
+        )
+    }
+
+    private fun start_battery_session(level: Int, mahRemaining: Int?, startedAtMillis: Long, isCharging: Boolean) {
+        activeBatterySessionStartLevel = level
+        activeBatterySessionStartMah = mahRemaining
+        activeBatterySessionStartAtMillis = startedAtMillis
+        activeBatterySessionCharging = isCharging
+    }
+
+    private fun finalize_battery_session(endLevel: Int, endMah: Int?) {
+        val wasCharging = activeBatterySessionCharging ?: return
+        val startLevel = activeBatterySessionStartLevel ?: return
+        val deltaLevel = abs(endLevel - startLevel)
+
+        if (wasCharging && deltaLevel > 0) {
+            val updatedCycles = (batteryManualCycles + (deltaLevel / 100f)).coerceAtLeast(batteryManualCycles)
+            if (updatedCycles > batteryManualCycles + 0.001f) {
+                batteryManualCycles = updatedCycles
+                scope.launch { prefs.set_battery_manual_cycles(updatedCycles) }
+            }
+        }
+
+        estimate_learned_capacity_sample(startLevel, endLevel, activeBatterySessionStartMah, endMah)?.let { sample ->
+            val updatedSamples = (learnedCapacitySamples + sample).takeLast(MAX_LEARNED_CAPACITY_SAMPLES)
+            if (updatedSamples != learnedCapacitySamples) {
+                learnedCapacitySamples = updatedSamples
+                scope.launch { prefs.set_battery_learned_capacity_samples(encode_capacity_samples(updatedSamples)) }
+            }
+        }
+    }
+
+    private fun refresh_cached_battery_capabilities() {
+        if (sysfsDesignMah == null) sysfsDesignMah = read_design_capacity_mah()
+        if (sysfsFullMah == null) sysfsFullMah = read_full_charge_capacity_mah()
+        if (sysfsCycleCount == null || sysfsCycleCount == 0) sysfsCycleCount = read_battery_cycle_count()
+    }
+
+    private fun read_design_capacity_mah(): Int? {
+        return read_capacity_value_mah(
+            "/sys/class/power_supply/battery/charge_full_design",
+            "/sys/class/power_supply/battery/energy_full_design",
+            "/sys/class/power_supply/battery/batt_full_capacity",
+            "/sys/class/power_supply/battery/fg_fullcapnom"
+        ) ?: read_power_profile_design_capacity_mah()
+    }
+
+    private fun read_full_charge_capacity_mah(): Int? {
+        return read_capacity_value_mah(
+            "/sys/class/power_supply/battery/charge_full",
+            "/sys/class/power_supply/battery/energy_full",
+            "/sys/class/power_supply/battery/fg_fullcapnom",
+            "/sys/class/power_supply/battery/full_charge_capacity"
+        )
+    }
+
+    private fun read_battery_cycle_count(): Int? {
+        return listOf(
+            "/sys/class/power_supply/battery/cycle_count",
+            "/sys/class/power_supply/battery/fg_cycle",
+            "/sys/class/power_supply/battery/battery_cycle_count"
+        ).firstNotNullOfOrNull { path ->
+            runCatching { File(path).readText().trim().toInt() }.getOrNull()?.takeIf { it > 0 }
+        }
+    }
+
+    private fun read_capacity_value_mah(vararg paths: String): Int? {
+        paths.forEach { path ->
+            val raw = runCatching { File(path).readText().trim() }.getOrNull() ?: return@forEach
+            val parsed = raw.toLongOrNull() ?: return@forEach
+            if (parsed <= 0L) return@forEach
+            val mah = when {
+                parsed >= 100_000L -> (parsed / 1000L).toInt()
+                parsed >= 1000L -> parsed.toInt()
+                else -> return@forEach
+            }
+            if (mah in 500..12_000) return mah
+        }
+        return null
+    }
+
+    private fun read_power_profile_design_capacity_mah(): Int? {
+        return runCatching {
+            val clazz = Class.forName("com.android.internal.os.PowerProfile")
+            val instance = clazz.getConstructor(Context::class.java).newInstance(this)
+            val method = clazz.getMethod("getBatteryCapacity")
+            val value = method.invoke(instance)
+            when (value) {
+                is Double -> value.roundToInt()
+                is Float -> value.roundToInt()
+                else -> null
+            }
+        }.getOrNull()?.takeIf { it in 500..12_000 }
+    }
+
+    private fun estimate_learned_capacity_sample(
+        startLevel: Int,
+        endLevel: Int,
+        startMah: Int?,
+        endMah: Int?
+    ): Int? {
+        val fromMah = startMah ?: return null
+        val toMah = endMah ?: return null
+        val deltaLevel = abs(endLevel - startLevel)
+        val deltaMah = abs(toMah - fromMah)
+        if (deltaLevel < MIN_LEARNED_CAPACITY_DELTA_LEVEL || deltaMah < MIN_LEARNED_CAPACITY_DELTA_MAH) return null
+
+        val estimatedFullMah = (deltaMah * 100f / deltaLevel.toFloat()).roundToInt()
+        val lowerBound = ((sysfsDesignMah ?: 1800) * 0.45f).roundToInt()
+        val upperBound = ((sysfsDesignMah ?: 6000) * 1.20f).roundToInt()
+        return estimatedFullMah.takeIf { it in lowerBound..upperBound }
+    }
+
+    private fun compute_learned_capacity_estimate(samples: List<Int>): Int? {
+        if (samples.size < MIN_LEARNED_CAPACITY_SAMPLES_TO_SURFACE) return null
+        val sorted = samples.sorted()
+        val trimmed = if (sorted.size >= 5) sorted.subList(1, sorted.lastIndex) else sorted
+        return trimmed.average().roundToInt().takeIf { it > 0 }
+    }
+
+    private fun decode_capacity_samples(raw: String): List<Int> {
+        return raw.split(',')
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 500..12_000 }
+            .takeLast(MAX_LEARNED_CAPACITY_SAMPLES)
+    }
+
+    private fun encode_capacity_samples(samples: List<Int>): String =
+        samples.takeLast(MAX_LEARNED_CAPACITY_SAMPLES).joinToString(",")
 
     private fun show_overlay() {
         if (overlayView != null) return
@@ -688,7 +897,9 @@ class AccessibilityOverlayService : AccessibilityService() {
             code = code,
             hourlyTemps = hourlyTemps.joinToString(","),
             hourlyCodes = hourlyCodes.joinToString(","),
-            hourlyWindsMph = hourlyWinds.joinToString(",")
+            hourlyWindsMph = hourlyWinds.joinToString(","),
+            sourceCurrentCode = code,
+            sourceCurrentSummary = current.optJSONObject("weatherCondition")?.optString("type")
         )
     }
 
@@ -745,7 +956,9 @@ class AccessibilityOverlayService : AccessibilityService() {
             code = currentCode,
             hourlyTemps = correctedTemps.joinToString(","),
             hourlyCodes = correctedCodes.joinToString(","),
-            hourlyWindsMph = correctedWinds.joinToString(",")
+            hourlyWindsMph = correctedWinds.joinToString(","),
+            sourceCurrentCode = currentCode,
+            sourceCurrentSummary = currentSummary
         )
     }
 
@@ -830,7 +1043,9 @@ class AccessibilityOverlayService : AccessibilityService() {
             code = code,
             hourlyTemps = json_numbers_to_csv(hourly.optJSONArray("temperature_2m"), startIndex),
             hourlyCodes = json_ints_to_csv(hourly.optJSONArray("weather_code"), startIndex),
-            hourlyWindsMph = json_numbers_to_csv(hourly.optJSONArray("wind_speed_10m"), startIndex)
+            hourlyWindsMph = json_numbers_to_csv(hourly.optJSONArray("wind_speed_10m"), startIndex),
+            sourceCurrentCode = code,
+            sourceCurrentSummary = null
         )
     }
 
@@ -1037,7 +1252,12 @@ class AccessibilityOverlayService : AccessibilityService() {
             .mapNotNull { it.trim().toIntOrNull() }
         if (hourlyCodes.isEmpty()) return snapshot
 
-        val correctedCurrent = reconcile_current_code(snapshot.code, hourlyCodes)
+        val correctedCurrent = reconcile_current_code(
+            currentCode = snapshot.code,
+            hourlyCodes = hourlyCodes,
+            sourceCurrentCode = snapshot.sourceCurrentCode,
+            sourceCurrentSummary = snapshot.sourceCurrentSummary
+        )
         val correctedHourly = stabilize_hourly_codes(hourlyCodes, correctedCurrent)
         return snapshot.copy(
             code = correctedCurrent,
@@ -1045,7 +1265,12 @@ class AccessibilityOverlayService : AccessibilityService() {
         )
     }
 
-    private fun reconcile_current_code(currentCode: Int, hourlyCodes: List<Int>): Int {
+    private fun reconcile_current_code(
+        currentCode: Int,
+        hourlyCodes: List<Int>,
+        sourceCurrentCode: Int?,
+        sourceCurrentSummary: String?
+    ): Int {
         val firstHourly = hourlyCodes.firstOrNull() ?: return currentCode
         val secondHourly = hourlyCodes.getOrNull(1) ?: firstHourly
 
@@ -1058,7 +1283,23 @@ class AccessibilityOverlayService : AccessibilityService() {
             return if (95 in listOf(firstHourly, secondHourly)) 95 else firstHourly
         }
 
+        val upcoming = hourlyCodes.take(3)
+        val quietSkySettled = upcoming.size >= 2 && upcoming.none { is_wintry_code(it) || it in setOf(61, 80, 95) }
+        val sourceLookedWintry = (sourceCurrentCode?.let(::is_wintry_code) == true) || description_mentions_wintry(sourceCurrentSummary)
+        if (is_wintry_code(currentCode) && quietSkySettled && sourceLookedWintry) {
+            return firstHourly
+        }
+
         return currentCode
+    }
+
+    private fun is_wintry_code(code: Int): Boolean = code in setOf(71, 73, 75, 77, 85, 86)
+
+    private fun description_mentions_wintry(summary: String?): Boolean {
+        val normalized = summary?.lowercase(Locale.US).orEmpty()
+        if (normalized.isBlank()) return false
+        return listOf("snow", "flurr", "sleet", "ice pellets", "freezing rain", "wintry mix", "blizzard")
+            .any { token -> token in normalized }
     }
 
     private fun remove_all_touch_windows() {

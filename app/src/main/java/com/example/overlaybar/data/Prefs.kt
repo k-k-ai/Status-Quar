@@ -110,6 +110,8 @@ object PrefsKeys {
     val HOURLY_TEMPS_F = stringPreferencesKey("hourly_temps_f")
     val HOURLY_WCODES = stringPreferencesKey("hourly_wcodes")
     val HOURLY_WINDS_MPH = stringPreferencesKey("hourly_winds_mph")
+    val BATTERY_MANUAL_CYCLES = floatPreferencesKey("battery_manual_cycles")
+    val BATTERY_LEARNED_CAPACITY_SAMPLES = stringPreferencesKey("battery_learned_capacity_samples")
 
     // Layout
     val ELEMENT_PADDING_DP       = intPreferencesKey("element_padding_dp")
@@ -263,6 +265,8 @@ class Prefs(private val context: Context) {
     val hourly_temps_f: Flow<String> = context.data_store.data.map { it[PrefsKeys.HOURLY_TEMPS_F] ?: "" }
     val hourly_wcodes: Flow<String> = context.data_store.data.map { it[PrefsKeys.HOURLY_WCODES] ?: "" }
     val hourly_winds_mph: Flow<String> = context.data_store.data.map { it[PrefsKeys.HOURLY_WINDS_MPH] ?: "" }
+    val battery_manual_cycles: Flow<Float> = context.data_store.data.map { it[PrefsKeys.BATTERY_MANUAL_CYCLES] ?: 0f }
+    val battery_learned_capacity_samples: Flow<String> = context.data_store.data.map { it[PrefsKeys.BATTERY_LEARNED_CAPACITY_SAMPLES] ?: "" }
 
     val element_padding_dp: Flow<Int> = context.data_store.data.map { it[PrefsKeys.ELEMENT_PADDING_DP] ?: 0 }
     val left_lane_clearance_dp: Flow<Int> = context.data_store.data.map { it[PrefsKeys.LEFT_LANE_CLEARANCE_DP] ?: 0 }
@@ -433,6 +437,17 @@ class Prefs(private val context: Context) {
             it[PrefsKeys.WEATHER_FETCHED_AT] = fetchedAt
         } // edit
     } // set_weather_snapshot
+
+    suspend fun set_battery_manual_cycles(value: Float) {
+        context.data_store.edit { it[PrefsKeys.BATTERY_MANUAL_CYCLES] = value.coerceAtLeast(0f) }
+    }
+
+    suspend fun set_battery_learned_capacity_samples(value: String) {
+        context.data_store.edit {
+            if (value.isBlank()) it.remove(PrefsKeys.BATTERY_LEARNED_CAPACITY_SAMPLES)
+            else it[PrefsKeys.BATTERY_LEARNED_CAPACITY_SAMPLES] = value
+        }
+    }
 
     suspend fun set_element_padding_dp(value: Int) { context.data_store.edit { it[PrefsKeys.ELEMENT_PADDING_DP] = value } }
     suspend fun set_left_lane_clearance_dp(value: Int) { context.data_store.edit { it[PrefsKeys.LEFT_LANE_CLEARANCE_DP] = value } }
