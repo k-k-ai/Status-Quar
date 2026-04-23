@@ -62,12 +62,12 @@ private const val BATTERY_INSIGHTS_VISIBLE = 4
 
 @Composable
 internal fun expanded_battery_card(
-    battery: BatterySnapshot,
+    battery_snapshot: BatterySnapshot,
     text_color: Color,
-    fontFamily: FontFamily,
-    fontScale: Float
+    font_family: FontFamily,
+    font_scale: Float
 ) {
-    val level_color = battery_level_color(battery.level, battery.charging, battery.full)
+    val level_color = battery_level_color(battery_snapshot.level, battery_snapshot.charging, battery_snapshot.full)
     val dim = text_color.copy(alpha = 0.56f)
 
     Column(
@@ -84,20 +84,20 @@ internal fun expanded_battery_card(
             Text(
                 "Battery",
                 color = dim,
-                fontSize = (11f * fontScale).sp,
-                fontFamily = fontFamily,
+                fontSize = (11f * font_scale).sp,
+                fontFamily = font_family,
                 fontWeight = FontWeight.Medium,
                 letterSpacing = 0.sp
             )
-            val plug = battery.plug_label
+            val plug = battery_snapshot.plug_label
             if (plug.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     plug_badge(plug, level_color)
                     Text(
                         plug,
                         color = level_color.copy(alpha = 0.85f),
-                        fontSize = (11f * fontScale).sp,
-                        fontFamily = fontFamily,
+                        fontSize = (11f * font_scale).sp,
+                        fontFamily = font_family,
                         fontWeight = FontWeight.Medium,
                         letterSpacing = 0.sp
                     )
@@ -114,18 +114,18 @@ internal fun expanded_battery_card(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                "${battery.level}%",
+                "${battery_snapshot.level}%",
                 color = text_color,
-                fontSize = (36f * fontScale).sp,
-                fontFamily = fontFamily,
+                fontSize = (36f * font_scale).sp,
+                fontFamily = font_family,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = (-0.5).sp
             )
             Text(
-                battery.state_label,
+                battery_snapshot.state_label,
                 color = level_color.copy(alpha = 0.92f),
-                fontSize = (12.5f * fontScale).sp,
-                fontFamily = fontFamily,
+                fontSize = (12.5f * font_scale).sp,
+                fontFamily = font_family,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(bottom = 5.dp),
                 letterSpacing = 0.sp
@@ -143,7 +143,7 @@ internal fun expanded_battery_card(
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth((battery.level / 100f).coerceIn(0f, 1f))
+                    .fillMaxWidth((battery_snapshot.level / 100f).coerceIn(0f, 1f))
                     .fillMaxHeight()
                     .background(level_color, RoundedCornerShape(4.dp))
             )
@@ -152,12 +152,12 @@ internal fun expanded_battery_card(
         Spacer(Modifier.height(10.dp))
 
         // Primary stats row
-        primary_stats_row(battery, text_color, dim, fontFamily, fontScale)
+        primary_stats_row(battery_snapshot, text_color, dim, font_family, font_scale)
 
         Spacer(Modifier.height(10.dp))
 
         // Insight sub-card with cycling fade
-        insight_sub_card(battery, text_color, dim, level_color, fontFamily, fontScale)
+        insight_sub_card(battery_snapshot, text_color, dim, level_color, font_family, font_scale)
     }
 }
 

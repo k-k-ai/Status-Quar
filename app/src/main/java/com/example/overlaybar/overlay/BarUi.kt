@@ -106,8 +106,7 @@ private fun lerpDp(start: Dp, end: Dp, fraction: Float): Dp =
 @Composable
 fun status_bar_overlay(
     config: OverlaySettingsSnapshot,
-    battery_level: Int,
-    is_charging: Boolean,
+    battery_snapshot: BatterySnapshot,
     fade_height_dp: Int = 40,
     editor: OverlayPreviewEditor? = null,
     modifier: Modifier = Modifier
@@ -260,7 +259,7 @@ fun status_bar_overlay(
         if (config.showBattery && bs.alignment == ALIGN_LEFT) {
             add(buildLaneEntry(OverlayElementId.BATTERY, bs, parse_hex_color(bs.pillColor), parse_hex_color(bs.pillStrokeColor), -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
-                    battery_module(battery_level, is_charging, bs, text_color, config.fontScale, selected_font_family)
+                    battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
             })
         }
@@ -276,7 +275,19 @@ fun status_bar_overlay(
         if (config.showWeather && ws.alignment == ALIGN_LEFT) {
             add(buildLaneEntry(OverlayElementId.WEATHER, ws, weatherFill, weatherStroke, if (isWeatherImmersive) liveBackdrop else -1, if (hiddenElementId == OverlayElementId.WEATHER) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.WEATHER, editor, text_color) {
-                    weather_module(ws, config.weatherMode, if (isWeatherImmersive) weatherTextColor else text_color, config.fontScale, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, weatherRefreshInFlight)
+                    weather_module(
+                        settings = ws,
+                        mode = config.weatherMode,
+                        color = if (isWeatherImmersive) weatherTextColor else text_color,
+                        scale = config.fontScale,
+                        family = selected_font_family,
+                        temp_f = config.weatherTempF,
+                        wind_mph = config.weatherWindMph,
+                        gust_mph = config.weatherGustMph,
+                        condition_code = config.weatherCode,
+                        is_refreshing = weatherRefreshInFlight,
+                        weather_updated_at = config.weatherFetchedAt
+                    )
                 }
             })
         }
@@ -303,7 +314,7 @@ fun status_bar_overlay(
         if (config.showBattery && bs.alignment != ALIGN_LEFT) {
             add(buildLaneEntry(OverlayElementId.BATTERY, bs, parse_hex_color(bs.pillColor), parse_hex_color(bs.pillStrokeColor), -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
-                    battery_module(battery_level, is_charging, bs, text_color, config.fontScale, selected_font_family)
+                    battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
             })
         }
@@ -319,7 +330,19 @@ fun status_bar_overlay(
         if (config.showWeather && ws.alignment != ALIGN_LEFT) {
             add(buildLaneEntry(OverlayElementId.WEATHER, ws, weatherFill, weatherStroke, if (isWeatherImmersive) liveBackdrop else -1, if (hiddenElementId == OverlayElementId.WEATHER) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.WEATHER, editor, text_color) {
-                    weather_module(ws, config.weatherMode, if (isWeatherImmersive) weatherTextColor else text_color, config.fontScale, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, weatherRefreshInFlight)
+                    weather_module(
+                        settings = ws,
+                        mode = config.weatherMode,
+                        color = if (isWeatherImmersive) weatherTextColor else text_color,
+                        scale = config.fontScale,
+                        family = selected_font_family,
+                        temp_f = config.weatherTempF,
+                        wind_mph = config.weatherWindMph,
+                        gust_mph = config.weatherGustMph,
+                        condition_code = config.weatherCode,
+                        is_refreshing = weatherRefreshInFlight,
+                        weather_updated_at = config.weatherFetchedAt
+                    )
                 }
             })
         }
@@ -382,6 +405,7 @@ fun status_bar_overlay(
                 OverlayElementId.WEATHER -> 186.dp
                 OverlayElementId.GIF -> 324.dp
                 OverlayElementId.TIME -> 290.dp
+                OverlayElementId.BATTERY -> 195.dp
                 else -> 100.dp
             }
             val useWeatherColors = (expandedId == OverlayElementId.WEATHER && isWeatherImmersive)
@@ -430,9 +454,9 @@ fun status_bar_overlay(
                 if (cardProgress < 0.32f) {
                     Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 1f - (cardProgress / 0.32f) }, contentAlignment = Alignment.Center) {
                         when (expandedId) {
-                            OverlayElementId.WEATHER -> weather_module(config.weatherSettings, config.weatherMode, contentColor, config.fontScale * 0.9f, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, weatherRefreshInFlight)
+                            OverlayElementId.WEATHER -> weather_module(config.weatherSettings, config.weatherMode, contentColor, config.fontScale * 0.9f, selected_font_family, config.weatherTempF, config.weatherWindMph, config.weatherGustMph, config.weatherCode, weatherRefreshInFlight, config.weatherFetchedAt)
                             OverlayElementId.TIME    -> time_module(timeStr, config.resolvedTimeSettings, contentColor, config.fontScale * 0.9f, selected_font_family)
-                            OverlayElementId.BATTERY -> battery_module(battery_level, is_charging, config.resolvedBatterySettings, contentColor, config.fontScale * 0.9f, selected_font_family)
+                            OverlayElementId.BATTERY -> battery_module(battery_snapshot.level, battery_snapshot.charging, config.resolvedBatterySettings, contentColor, config.fontScale * 0.9f, selected_font_family)
                             else -> {}
                         }
                     }
@@ -442,22 +466,22 @@ fun status_bar_overlay(
                         when (expandedId) {
                             OverlayElementId.WEATHER -> {
                                 hourly_forecast_card(
-                                    hourlyTemps,
-                                    hourlyCodes,
-                                    hourlyWinds,
-                                    currentHour,
-                                    config.weatherWindMph,
-                                    config.weatherGustMph,
-                                    config.weatherLat,
-                                    config.weatherLon,
-                                    contentColor,
-                                    selected_font_family,
-                                    config.fontScale,
-                                    config.use24HourTime,
-                                    weatherRefreshInFlight,
-                                    config.weatherLocationSource,
-                                    config.weatherFetchedAt,
-                                    currentTimeMillis.value
+                                    temps = hourlyTemps,
+                                    codes = hourlyCodes,
+                                    winds = hourlyWinds,
+                                    current_hour = currentHour,
+                                    current_wind_mph = config.weatherWindMph,
+                                    gust_mph = config.weatherGustMph,
+                                    weather_lat = config.weatherLat,
+                                    weather_lon = config.weatherLon,
+                                    text_color = contentColor,
+                                    fontFamily = selected_font_family,
+                                    fontScale = config.fontScale,
+                                    use_24_hour = config.use24HourTime,
+                                    is_refreshing = weatherRefreshInFlight,
+                                    location_source = config.weatherLocationSource,
+                                    fetched_at_millis = config.weatherFetchedAt,
+                                    now_millis = currentTimeMillis.value
                                 )
                             }
                             OverlayElementId.TIME -> {
@@ -479,6 +503,14 @@ fun status_bar_overlay(
                             }
                             OverlayElementId.GIF -> {
                                 expanded_gif_card(config.gifUri)
+                            }
+                            OverlayElementId.BATTERY -> {
+                                expanded_battery_card(
+                                    battery_snapshot = battery_snapshot,
+                                    text_color = contentColor,
+                                    font_family = selected_font_family,
+                                    font_scale = config.fontScale
+                                )
                             }
                             else -> {
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -673,7 +705,8 @@ private fun gif_module(uri: String?, settings: ElementSettings, scale: Float) {
 
 
 private fun adjust_timer_duration_by(now: Long, currentStart: Long?, currentEnd: Long?, deltaMillis: Long) {
-    val updatedEnd = (currentEnd ?: return) + deltaMillis
+    val baseEnd = currentEnd ?: now
+    val updatedEnd = baseEnd + deltaMillis
     if (updatedEnd <= now) {
         AccessibilityOverlayService.activeTimerEndMillisFlow.value = null
         AccessibilityOverlayService.timerSetAtMillisFlow.value = null
@@ -685,83 +718,3 @@ private fun adjust_timer_duration_by(now: Long, currentStart: Long?, currentEnd:
     AccessibilityOverlayService.activeTimerEndMillisFlow.value = updatedEnd
     AccessibilityOverlayService.timerSetAtMillisFlow.value = currentStart ?: now
 }
-
-@Composable
-private fun weather_module(settings: ElementSettings, mode: Int, color: Color, scale: Float, family: FontFamily, tempF: Float, windMph: Float, gustMph: Float?, isRefreshing: Boolean) {
-    val weight = if (settings.weight == WEIGHT_NORMAL) FontWeight.Normal else if (settings.weight == WEIGHT_BOLD) FontWeight.Bold else FontWeight.Black
-    val style = if (settings.italic) FontStyle.Italic else FontStyle.Normal
-    val temp_str = when {
-        tempF > 0f -> "${tempF.toInt()}°"
-        isRefreshing -> "..."
-        else -> "--°"
-    }
-    val wind_str = compact_weather_wind_label(windMph, gustMph, isRefreshing)
-    Box(modifier = Modifier.testTag("overlay_weather").graphicsLayer { scaleX = settings.sizeScale; scaleY = settings.sizeScale }) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            when (mode) {
-                0 -> {
-                    Text(temp_str, color = color, fontSize = (12f * scale).sp, fontWeight = weight, fontFamily = family, fontStyle = style, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                    Text(wind_str, color = color.copy(alpha = 0.8f), fontSize = (11f * scale).sp, fontWeight = weight, fontFamily = family, fontStyle = style, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                }
-                1 -> Text(temp_str, color = color, fontSize = (12f * scale).sp, fontWeight = weight, fontFamily = family, fontStyle = style, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                2 -> {
-                    Text(temp_str, color = color, fontSize = (12f * scale).sp, fontWeight = weight, fontFamily = family, fontStyle = style, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                    Text(wind_str, color = color.copy(alpha = 0.8f), fontSize = (11f * scale).sp, fontWeight = weight, fontFamily = family, fontStyle = style, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                }
-                3 -> { /* cloud-only */ }
-            }
-        }
-    }
-}
-
-@Composable
-private fun hourly_weather_flare(code: Int, displayHour: Int, windMph: Float?, modifier: Modifier = Modifier) {
-    val backdrop = resolve_backdrop_from_code(code, windMph ?: 0f, displayHour)
-    val solarBrightness = if (displayHour in 6..18) 1f else 0.15f
-    val flareProgress = if (backdrop == WEATHER_BACKDROP_SUNNY) 0.92f else 0.5f
-    Box(
-        modifier = modifier
-            .weather_flare_surface(
-                backdrop = backdrop,
-                solar_brightness = solarBrightness,
-                clear_wayhead_progress = flareProgress
-            )
-    )
-}
-
-
-
-
-
-private fun weather_short_label(code: Int): String = when (code) {
-    0 -> "Clear"
-    1 -> "Sparsely Cloudy"
-    2 -> "Partly Cloudy"
-    3 -> "Mostly Cloudy"
-    45, 48 -> "Foggy"
-    51, 53, 55 -> "Drizzle"
-    61, 63, 65 -> "Rainy"
-    71, 73, 75 -> "Snowy"
-    77 -> "Sleet"
-    80, 81, 82 -> "Showers"
-    85, 86 -> "Flurries"
-    95 -> "Stormy"
-    96, 99 -> "Hail"
-    else -> "Cloudy"
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

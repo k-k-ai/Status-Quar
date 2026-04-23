@@ -135,7 +135,11 @@ internal fun BoxScope.overlay_lane(
                         .height(mergedHitHeight)
                         .padding(horizontal = mergedHitPadding)
                         .graphicsLayer { alpha = entryAlpha }
-                        .onGloballyPositioned { onReportBounds(entry.id, it.boundsInRoot()) },
+                        .onGloballyPositioned { onReportBounds(entry.id, it.boundsInRoot()) }
+                        .then(if (entry.onTap != null) Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { entry.onTap() } else Modifier),
                     contentAlignment = Alignment.Center
                 ) {
                     val itemContent = entry.content

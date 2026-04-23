@@ -101,6 +101,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         val stopwatchRunningFlow = MutableStateFlow(false)
         val stopwatchStartMillisFlow = MutableStateFlow<Long?>(null)
         val stopwatchAccumulatedMillisFlow = MutableStateFlow(0L)
+        val batterySnapshotFlow = MutableStateFlow(BatterySnapshot())
 
         private const val OVERLAY_FADE_HEIGHT_DP = 52
         private const val TOUCH_EDGE_GESTURE_GUTTER_DP = 24
@@ -177,25 +178,35 @@ class AccessibilityOverlayService : AccessibilityService() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
-    private val _batteryLevel = MutableStateFlow(100)
-    private val batteryLevel: StateFlow<Int> = _batteryLevel
-
-    private val _isCharging = MutableStateFlow(false)
-    private val isCharging: StateFlow<Boolean> = _isCharging
-
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             intent ?: return
             val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
             val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            val plugType = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+            val temperature = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
 
-            if (level >= 0 && scale > 0) {
-                _batteryLevel.value = (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100)
-            }
+            val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+            val mahRemaining = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER).takeIf { it != Int.MIN_VALUE }?.let { it / 1000 }
+            } else null
+            val currentMa = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW).takeIf { it != Int.MIN_VALUE }?.let { it / 1000 }
+            } else null
 
-            _isCharging.value = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL
+            val currentLevel = if (level >= 0 && scale > 0) (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100) else 100
+            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+
+            batterySnapshotFlow.value = batterySnapshotFlow.value.copy(
+                level = currentLevel,
+                charging = isCharging,
+                full = status == BatteryManager.BATTERY_STATUS_FULL,
+                plug_type = plugType,
+                temperature_c = temperature,
+                mah_remaining = mahRemaining,
+                current_ma = currentMa
+            )
         }
     }
 
@@ -327,14 +338,12 @@ class AccessibilityOverlayService : AccessibilityService() {
 
             setContent {
                 val settings by prefs.overlay_settings.collectAsState(initial = OverlaySettingsSnapshot())
-                val batteryLevel by batteryLevel.collectAsState()
-                val isCharging by isCharging.collectAsState()
+                val battery by batterySnapshotFlow.collectAsState()
 
                 if (settings.enabled) {
                     status_bar_overlay(
                         config = settings,
-                        battery_level = batteryLevel,
-                        is_charging = isCharging,
+                        battery_snapshot = battery,
                         fade_height_dp = OVERLAY_FADE_HEIGHT_DP
                     )
                 }
@@ -357,9 +366,31 @@ class AccessibilityOverlayService : AccessibilityService() {
         overlayView = composeView
         overlayLayoutParams = lp
 
+        scope.launch {
+            expandedCardBoundsFlow.collect { bounds ->
+                update_overlay_window_bounds(bounds)
+            }
+        }
+
         owner.onCreate()
         owner.onStart()
         owner.onResume()
+    }
+
+    private fun update_overlay_window_bounds(bounds: android.graphics.Rect?) {
+        val wm = wm ?: return
+        val view = overlayView ?: return
+        val lp = overlayLayoutParams ?: return
+        val screenHeight = resources.displayMetrics.heightPixels
+        
+        // If not expanded, make it small height to avoid blocking swipes.
+        if (expandedElementFlow.value == null) {
+            lp.height = (80 * resources.displayMetrics.density).toInt()
+        } else {
+            lp.height = (screenHeight * 0.75f).toInt()
+        }
+        
+        runCatching { wm.updateViewLayout(view, lp) }
     }
 
     private fun create_overlay_flags(touchable: Boolean): Int {
@@ -374,9 +405,13 @@ class AccessibilityOverlayService : AccessibilityService() {
         val view = overlayView ?: return
         val lp = overlayLayoutParams ?: return
         val updatedFlags = create_overlay_flags(touchable)
-        if (lp.flags == updatedFlags) return
+        if (lp.flags == updatedFlags) {
+            // Even if flags didn't change, we might need to update bounds (height) based on expansion state
+            update_overlay_window_bounds(null)
+            return
+        }
         lp.flags = updatedFlags
-        runCatching { wm.updateViewLayout(view, lp) }
+        update_overlay_window_bounds(null)
     }
 
     private fun schedule_timer_alarm(endMillis: Long) {
@@ -1191,11 +1226,17 @@ class AccessibilityOverlayService : AccessibilityService() {
         }
         return clusters.mapNotNull { rect ->
             val adjusted = android.graphics.Rect(rect)
+            // Left/Right exclusion for side gestures
             if (adjusted.left <= edgeGestureGutterPx) {
                 adjusted.left = edgeGestureGutterPx
             }
             if (adjusted.right >= screenWidth - edgeGestureGutterPx) {
                 adjusted.right = screenWidth - edgeGestureGutterPx
+            }
+            // Top exclusion for status bar swipe down
+            val topGutterPx = (4 * resources.displayMetrics.density).toInt()
+            if (adjusted.top <= topGutterPx) {
+                adjusted.top = topGutterPx
             }
             adjusted.takeIf { it.width() > 0 && it.height() > 0 }
         }
