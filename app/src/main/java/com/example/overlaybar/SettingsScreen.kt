@@ -101,6 +101,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.overlaybar.ui.theme.*
 import com.example.overlaybar.data.*
+import com.example.overlaybar.overlay.BatteryDebugState
 import kotlin.math.roundToInt
 
 
@@ -118,6 +119,7 @@ private val action_shape = OneUi.ShapePill
 @Composable
 fun settings_screen(
     settings: OverlaySettingsSnapshot,
+    battery_debug_state: BatteryDebugState,
     selected_element_id: OverlayElementId,
     needs_accessibility_setup: Boolean,
     has_location_permission: Boolean,
@@ -186,6 +188,7 @@ fun settings_screen(
         item(key = "selected_element_editor_${selected_element_id.name}", contentType = "editor") {
             selected_element_editor_card(
                 settings = settings,
+                battery_debug_state = battery_debug_state,
                 has_location_permission = has_location_permission,
                 element_id = selected_element_id,
                 on_action = on_action,
@@ -291,9 +294,11 @@ private fun placement_card(settings: OverlaySettingsSnapshot, selected_element_i
     }
 } // placement_card
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
  private fun selected_element_editor_card(
     settings: OverlaySettingsSnapshot,
+    battery_debug_state: BatteryDebugState,
     has_location_permission: Boolean,
     element_id: OverlayElementId,
     on_action: (SettingsAction) -> Unit,
@@ -416,6 +421,52 @@ private fun placement_card(settings: OverlaySettingsSnapshot, selected_element_i
                     modifier = Modifier.padding(horizontal = OneUi.CardInternalPadding)
                 )
                 settings_divider()
+            }
+            if (element_id == OverlayElementId.BATTERY) {
+                item_header("Battery Debug (Temp)", Modifier.padding(horizontal = OneUi.CardInternalPadding))
+                tree_switch_row(
+                    "Use debug battery",
+                    "Temporarily override live battery data for overlay testing",
+                    battery_debug_state.enabled,
+                    { on_action(SettingsAction.SetBatteryDebugEnabled(it)) }
+                )
+                settings_divider()
+                if (battery_debug_state.enabled) {
+                    FlowRow(
+                        modifier = Modifier.padding(horizontal = OneUi.CardInternalPadding, vertical = OneUi.SpaceS),
+                        horizontalArrangement = Arrangement.spacedBy(OneUi.SpaceS),
+                        verticalArrangement = Arrangement.spacedBy(OneUi.SpaceS)
+                    ) {
+                        oneui_pill_button("Draining", onClick = { on_action(SettingsAction.ApplyBatteryDebugPreset(BatteryDebugPreset.DRAINING)) })
+                        oneui_pill_button("Charging", onClick = { on_action(SettingsAction.ApplyBatteryDebugPreset(BatteryDebugPreset.CHARGING)) })
+                        oneui_pill_button("Low Power", onClick = { on_action(SettingsAction.ApplyBatteryDebugPreset(BatteryDebugPreset.LOW_POWER)) })
+                        oneui_pill_button("Full", onClick = { on_action(SettingsAction.ApplyBatteryDebugPreset(BatteryDebugPreset.FULL)) })
+                        oneui_pill_button("Use Live", onClick = { on_action(SettingsAction.ClearBatteryDebug) })
+                    }
+                    settings_divider()
+                    tree_switch_row("Charging", "", battery_debug_state.charging, { on_action(SettingsAction.SetBatteryDebugCharging(it)) })
+                    settings_divider()
+                    tree_switch_row("Full", "", battery_debug_state.full, { on_action(SettingsAction.SetBatteryDebugFull(it)) })
+                    settings_divider()
+                    tree_switch_row("Low power mode", "", battery_debug_state.powerSave, { on_action(SettingsAction.SetBatteryDebugPowerSave(it)) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_level", "Battery level", "", battery_debug_state.level.toFloat(), 0f..100f, 99, { "${it.toInt()}%" }, { on_action(SettingsAction.CommitBatteryDebugLevel(it.toInt())) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_remaining", "Remaining charge", "", battery_debug_state.remainingMah.toFloat(), 0f..6000f, 59, { "${it.toInt()} mAh" }, { on_action(SettingsAction.CommitBatteryDebugRemainingMah(it.toInt())) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_current", "Current draw/input", "", battery_debug_state.currentMa.toFloat(), 0f..4000f, 79, { "${it.toInt()} mA" }, { on_action(SettingsAction.CommitBatteryDebugCurrentMa(it.toInt())) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_temp", "Temperature", "", battery_debug_state.temperatureC, 0f..55f, 54, { "${it.toInt()} C" }, { on_action(SettingsAction.CommitBatteryDebugTemperature(it)) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_capacity", "Estimated full capacity", "", battery_debug_state.learnedFullMah.toFloat(), 500f..6500f, 59, { "${it.toInt()} mAh" }, { on_action(SettingsAction.CommitBatteryDebugLearnedFullMah(it.toInt())) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_cycles", "Cycles", "", battery_debug_state.cycles, 0f..1200f, 119, { "${it.toInt()}" }, { on_action(SettingsAction.CommitBatteryDebugCycles(it)) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_session_delta", "Session delta", "", battery_debug_state.sessionDeltaLevel.toFloat(), 0f..100f, 99, { "${it.toInt()}%" }, { on_action(SettingsAction.CommitBatteryDebugSessionDeltaLevel(it.toInt())) })
+                    settings_divider()
+                    commit_slider_row("battery_debug_session_duration", "Session duration", "", battery_debug_state.sessionDurationMinutes.toFloat(), 0f..720f, 71, { "${it.toInt()} min" }, { on_action(SettingsAction.CommitBatteryDebugSessionDuration(it.toInt())) })
+                    settings_divider()
+                }
             }
             segmented_setting_row("Order in lane", "", element_settings.order, listOf(0 to "1", 1 to "2", 2 to "3", 3 to "4"), { on_action(SettingsAction.SetElementOrder(element_id, it)) })
             settings_divider()

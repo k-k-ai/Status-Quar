@@ -34,10 +34,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -77,6 +78,7 @@ internal data class OverlayLaneEntry(
 )
 
 internal val LANE_SHAPE = RoundedCornerShape(percent = 100)
+private val BATTERY_DEPLETED_STROKE = Color(0xFF7F8791)
 
 
 /// Functions
@@ -172,18 +174,16 @@ internal fun BoxScope.overlay_lane(
                                     val progress = entry.timerArcProgress.coerceIn(0f, 1f)
                                     if (progress > 0f) {
                                         val strokeWidth = 2.5.dp.toPx()
-                                        val inset = strokeWidth / 2f
-                                        drawArc(
+                                        val outline = build_round_rect_outline_path(
+                                            width = size.width,
+                                            height = size.height,
+                                            corner = size.height / 2f
+                                        )
+                                        draw_outline_progress_stroke(
+                                            path = outline,
                                             color = Color(0x60FF3B3B),
-                                            startAngle = -90f,
-                                            sweepAngle = 360f * progress,
-                                            useCenter = false,
-                                            topLeft = Offset(inset, inset),
-                                            size = Size(
-                                                (size.width - strokeWidth).coerceAtLeast(0f),
-                                                (size.height - strokeWidth).coerceAtLeast(0f)
-                                            ),
-                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                                            progress = progress,
+                                            stroke_width = strokeWidth
                                         )
                                     }
                                 }
@@ -235,10 +235,11 @@ internal fun Modifier.lane_surface(
         .height(pill_height)
         .drawBehind {
             val r = size.height / 2f
-            val path = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, r, r)) }
-            drawPath(path, fill)
+            val fill_path = Path().apply { addRoundRect(RoundRect(0f, 0f, size.width, size.height, r, r)) }
+            val outline_path = build_round_rect_outline_path(size.width, size.height, r)
+            drawPath(fill_path, fill)
             if (backdrop != -1) {
-                withTransform({ clipPath(path) }) {
+                withTransform({ clipPath(fill_path) }) {
                     when (backdrop) {
                         WEATHER_BACKDROP_CLOUDY  -> draw_cloud_bunches(clear_wayhead_progress = clearWayheadProgress)
                         WEATHER_BACKDROP_SUNNY   -> draw_sunny_glow(solarBrightness, clearWayheadProgress)
@@ -251,62 +252,132 @@ internal fun Modifier.lane_surface(
             }
             if (border != Color.Transparent) {
                 if (battery_level_slice in 0f..1f) {
-                    val strokeWidth = 3.dp.toPx()
-                    val inset = strokeWidth / 2f
-                    val indicatorLevel = battery_level_value ?: (battery_level_slice * 100f).toInt()
-                    val indicatorColor = battery_level_color(
-                        level = indicatorLevel,
-                        charging = battery_charging,
-                        full = battery_full
+                    draw_battery_level_stroke(
+                        width = size.width,
+                        height = size.height,
+                        corner = r,
+                        active_color = border,
+                        level_slice = battery_level_slice,
+                        stroke_width = 3.dp.toPx()
                     )
-                    val gradient = when {
-                        battery_full || indicatorLevel >= 100 -> listOf(indicatorColor, indicatorColor)
-                        battery_charging -> listOf(
-                            Color(0xFF7EE7A7),
-                            indicatorColor
-                        )
-                        else -> listOf(
-                            Color(0xFF34C759),
-                            Color(0xFFFFC857),
-                            Color(0xFFFF453A)
-                        )
-                    }
-                    drawPath(
-                        path = path,
-                        color = border.copy(alpha = 0.18f),
-                        style = Stroke(width = strokeWidth)
-                    )
-                    clipPath(path) {
-                        drawRect(
-                            brush = Brush.horizontalGradient(gradient),
-                            topLeft = Offset(0f, 0f),
-                            size = Size(size.width * battery_level_slice, size.height)
-                        )
-                        drawRect(
-                            color = fill,
-                            topLeft = Offset(size.width * battery_level_slice, 0f),
-                            size = Size((size.width * (1f - battery_level_slice)).coerceAtLeast(0f), size.height)
-                        )
-                    }
-                    drawRoundRect(
-                        brush = Brush.horizontalGradient(gradient),
-                        topLeft = Offset(inset, inset),
-                        size = Size((size.width - strokeWidth).coerceAtLeast(0f), (size.height - strokeWidth).coerceAtLeast(0f)),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius((size.height - strokeWidth).coerceAtLeast(0f) / 2f),
-                        style = Stroke(width = strokeWidth)
-                    )
-                    clipPath(path) {
-                        drawRect(
-                            color = fill,
-                            topLeft = Offset(size.width * battery_level_slice, 0f),
-                            size = Size((size.width * (1f - battery_level_slice)).coerceAtLeast(0f), size.height)
-                        )
-                    }
                 } else {
-                    drawPath(path, color = border, style = Stroke(width = 3.dp.toPx()))
+                    drawPath(outline_path, color = border, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round))
                 }
             }
         }
         .padding(horizontal = h_pad)
 } // lane_surface
+
+internal fun DrawScope.draw_battery_level_stroke(
+    width: Float,
+    height: Float,
+    corner: Float,
+    active_color: Color,
+    level_slice: Float,
+    stroke_width: Float,
+    depleted_color: Color = BATTERY_DEPLETED_STROKE
+) {
+    val resolved_slice = level_slice.coerceIn(0f, 1f)
+    val outline_path = build_round_rect_outline_path(width, height, corner)
+    val stroke = Stroke(width = stroke_width, cap = StrokeCap.Round)
+    if (resolved_slice >= 1f) {
+        drawPath(outline_path, color = active_color, style = stroke)
+        return
+    }
+    drawPath(outline_path, color = depleted_color, style = stroke)
+    if (resolved_slice <= 0f) return
+    val active_contour = build_left_level_contour_path(width, height, corner, resolved_slice)
+    if (!active_contour.isEmpty) {
+        drawPath(active_contour, color = active_color, style = stroke)
+    }
+}
+
+internal fun DrawScope.draw_outline_progress_stroke(
+    path: Path,
+    color: Color,
+    progress: Float,
+    stroke_width: Float
+) {
+    val resolved_progress = progress.coerceIn(0f, 1f)
+    if (resolved_progress <= 0f) return
+    val measure = PathMeasure()
+    measure.setPath(path, true)
+    val length = measure.length
+    if (length <= 0f) return
+    val stop = length * resolved_progress
+    val segment = Path()
+    measure.getSegment(0f, stop, segment, true)
+    drawPath(segment, color = color, style = Stroke(width = stroke_width, cap = StrokeCap.Round))
+}
+
+internal fun build_round_rect_outline_path(width: Float, height: Float, corner: Float): Path {
+    if (width <= 0f || height <= 0f) return Path()
+    val r = corner.coerceIn(0f, minOf(width, height) / 2f)
+    val top_left = Rect(0f, 0f, 2f * r, 2f * r)
+    val top_right = Rect(width - 2f * r, 0f, width, 2f * r)
+    val bottom_right = Rect(width - 2f * r, height - 2f * r, width, height)
+    val bottom_left = Rect(0f, height - 2f * r, 2f * r, height)
+    return Path().apply {
+        moveTo(width / 2f, 0f)
+        lineTo(width - r, 0f)
+        arcTo(top_right, 270f, 90f, false)
+        lineTo(width, height - r)
+        arcTo(bottom_right, 0f, 90f, false)
+        lineTo(r, height)
+        arcTo(bottom_left, 90f, 90f, false)
+        lineTo(0f, r)
+        arcTo(top_left, 180f, 90f, false)
+        lineTo(width / 2f, 0f)
+        close()
+    }
+}
+
+private fun build_left_level_contour_path(width: Float, height: Float, corner: Float, level_slice: Float): Path {
+    if (width <= 0f || height <= 0f) return Path()
+    val resolved_slice = level_slice.coerceIn(0f, 1f)
+    if (resolved_slice <= 0f) return Path()
+    if (resolved_slice >= 1f) return build_round_rect_outline_path(width, height, corner)
+
+    val r = corner.coerceIn(0f, minOf(width, height) / 2f)
+    val cutoff = (width * resolved_slice).coerceIn(0f, width)
+    val top_left = Rect(0f, 0f, 2f * r, 2f * r)
+    val top_right = Rect(width - 2f * r, 0f, width, 2f * r)
+    val bottom_right = Rect(width - 2f * r, height - 2f * r, width, height)
+    val bottom_left = Rect(0f, height - 2f * r, 2f * r, height)
+
+    return Path().apply {
+        when {
+            cutoff <= r -> {
+                val normalized = ((cutoff - r) / r).coerceIn(-1f, 0f)
+                val bottom_angle = Math.toDegrees(kotlin.math.acos(normalized.toDouble())).toFloat()
+                val top_angle = 360f - bottom_angle
+                arcTo(top_left, top_angle, 180f - top_angle, true)
+                lineTo(0f, height - r)
+                arcTo(bottom_left, 180f, bottom_angle - 180f, false)
+            }
+
+            cutoff < width - r -> {
+                moveTo(cutoff, 0f)
+                lineTo(r, 0f)
+                arcTo(top_left, 270f, -90f, false)
+                lineTo(0f, height - r)
+                arcTo(bottom_left, 180f, -90f, false)
+                lineTo(cutoff, height)
+            }
+
+            else -> {
+                val normalized = ((cutoff - (width - r)) / r).coerceIn(0f, 1f)
+                val bottom_angle = Math.toDegrees(kotlin.math.acos(normalized.toDouble())).toFloat()
+                val top_angle = 360f - bottom_angle
+                arcTo(top_right, top_angle, 270f - top_angle, true)
+                lineTo(r, 0f)
+                arcTo(top_left, 270f, -90f, false)
+                lineTo(0f, height - r)
+                arcTo(bottom_left, 180f, -90f, false)
+                lineTo(width - r, height)
+                arcTo(bottom_right, 90f, bottom_angle - 90f, false)
+            }
+        }
+    }
+}
 

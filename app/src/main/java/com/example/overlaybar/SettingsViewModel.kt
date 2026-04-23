@@ -26,6 +26,7 @@ import com.example.overlaybar.data.SettingsTreeGroup
 import com.example.overlaybar.data.SettingsUiState
 import com.example.overlaybar.data.default_expanded_groups
 import com.example.overlaybar.overlay.AccessibilityOverlayService
+import com.example.overlaybar.overlay.BatteryDebugState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -76,10 +77,31 @@ sealed interface SettingsAction {
     data class SetWeatherZip(val value: String) : SettingsAction
     data class SetWeatherLocationMode(val value: Int) : SettingsAction
     data class CommitWeatherBackdrop(val value: Int) : SettingsAction
+    data class SetBatteryDebugEnabled(val value: Boolean) : SettingsAction
+    data class SetBatteryDebugCharging(val value: Boolean) : SettingsAction
+    data class SetBatteryDebugFull(val value: Boolean) : SettingsAction
+    data class SetBatteryDebugPowerSave(val value: Boolean) : SettingsAction
+    data class CommitBatteryDebugLevel(val value: Int) : SettingsAction
+    data class CommitBatteryDebugRemainingMah(val value: Int) : SettingsAction
+    data class CommitBatteryDebugCurrentMa(val value: Int) : SettingsAction
+    data class CommitBatteryDebugTemperature(val value: Float) : SettingsAction
+    data class CommitBatteryDebugLearnedFullMah(val value: Int) : SettingsAction
+    data class CommitBatteryDebugCycles(val value: Float) : SettingsAction
+    data class CommitBatteryDebugSessionDeltaLevel(val value: Int) : SettingsAction
+    data class CommitBatteryDebugSessionDuration(val value: Int) : SettingsAction
+    data class ApplyBatteryDebugPreset(val preset: BatteryDebugPreset) : SettingsAction
+    data object ClearBatteryDebug : SettingsAction
     data object RefreshWeather : SettingsAction
     data object ResetAll : SettingsAction
     data object RefreshSystemState : SettingsAction
 } // settings_action
+
+enum class BatteryDebugPreset {
+    DRAINING,
+    CHARGING,
+    LOW_POWER,
+    FULL
+}
 
 class SettingsViewModel(
     private val appContext: Context,
@@ -92,6 +114,7 @@ class SettingsViewModel(
     private val is_charging = MutableStateFlow(false)
     private val expanded_groups = MutableStateFlow(default_expanded_groups())
     private val selected_element = MutableStateFlow(OverlayElementId.TIME)
+    val battery_debug_state: StateFlow<BatteryDebugState> = AccessibilityOverlayService.batteryDebugOverrideFlow
     private var battery_receiver_registered = false
 
     private val battery_receiver = object : BroadcastReceiver() {
@@ -157,6 +180,27 @@ class SettingsViewModel(
                 AccessibilityOverlayService.weatherRefreshRequests.emit(Unit)
             }
             is SettingsAction.CommitWeatherBackdrop -> launch_edit { prefs.set_weather_backdrop(action.value) }
+            is SettingsAction.SetBatteryDebugEnabled -> update_battery_debug { copy(enabled = action.value) }
+            is SettingsAction.SetBatteryDebugCharging -> update_battery_debug {
+                copy(charging = action.value, full = if (action.value) false else full)
+            }
+            is SettingsAction.SetBatteryDebugFull -> update_battery_debug {
+                copy(full = action.value, charging = if (action.value) true else charging, level = if (action.value) 100 else level)
+            }
+            is SettingsAction.SetBatteryDebugPowerSave -> update_battery_debug { copy(powerSave = action.value) }
+            is SettingsAction.CommitBatteryDebugLevel -> update_battery_debug {
+                val clamped = action.value.coerceIn(0, 100)
+                copy(level = clamped, full = if (clamped < 100) false else full)
+            }
+            is SettingsAction.CommitBatteryDebugRemainingMah -> update_battery_debug { copy(remainingMah = action.value.coerceAtLeast(0)) }
+            is SettingsAction.CommitBatteryDebugCurrentMa -> update_battery_debug { copy(currentMa = action.value.coerceAtLeast(0)) }
+            is SettingsAction.CommitBatteryDebugTemperature -> update_battery_debug { copy(temperatureC = action.value.coerceIn(0f, 60f)) }
+            is SettingsAction.CommitBatteryDebugLearnedFullMah -> update_battery_debug { copy(learnedFullMah = action.value.coerceAtLeast(500)) }
+            is SettingsAction.CommitBatteryDebugCycles -> update_battery_debug { copy(cycles = action.value.coerceAtLeast(0f)) }
+            is SettingsAction.CommitBatteryDebugSessionDeltaLevel -> update_battery_debug { copy(sessionDeltaLevel = action.value.coerceAtLeast(0)) }
+            is SettingsAction.CommitBatteryDebugSessionDuration -> update_battery_debug { copy(sessionDurationMinutes = action.value.coerceAtLeast(0)) }
+            is SettingsAction.ApplyBatteryDebugPreset -> apply_battery_debug_preset(action.preset)
+            SettingsAction.ClearBatteryDebug -> AccessibilityOverlayService.batteryDebugOverrideFlow.value = BatteryDebugState()
             SettingsAction.RefreshWeather -> viewModelScope.launch {
                 AccessibilityOverlayService.weatherRefreshRequests.emit(Unit)
             }
@@ -361,6 +405,73 @@ class SettingsViewModel(
     private fun launch_edit(block: suspend () -> Unit) {
         viewModelScope.launch { block() }
     } // launch_edit
+
+    private fun update_battery_debug(transform: BatteryDebugState.() -> BatteryDebugState) {
+        AccessibilityOverlayService.batteryDebugOverrideFlow.value =
+            AccessibilityOverlayService.batteryDebugOverrideFlow.value.transform()
+    }
+
+    private fun apply_battery_debug_preset(preset: BatteryDebugPreset) {
+        val next = when (preset) {
+            BatteryDebugPreset.DRAINING -> BatteryDebugState(
+                enabled = true,
+                level = 27,
+                charging = false,
+                full = false,
+                powerSave = false,
+                remainingMah = 880,
+                currentMa = 540,
+                temperatureC = 33f,
+                learnedFullMah = 3260,
+                cycles = 291f,
+                sessionDeltaLevel = 11,
+                sessionDurationMinutes = 178
+            )
+            BatteryDebugPreset.CHARGING -> BatteryDebugState(
+                enabled = true,
+                level = 61,
+                charging = true,
+                full = false,
+                powerSave = false,
+                remainingMah = 2010,
+                currentMa = 1480,
+                temperatureC = 35f,
+                learnedFullMah = 3260,
+                cycles = 291f,
+                sessionDeltaLevel = 14,
+                sessionDurationMinutes = 64
+            )
+            BatteryDebugPreset.LOW_POWER -> BatteryDebugState(
+                enabled = true,
+                level = 18,
+                charging = false,
+                full = false,
+                powerSave = true,
+                remainingMah = 560,
+                currentMa = 390,
+                temperatureC = 31f,
+                learnedFullMah = 3260,
+                cycles = 291f,
+                sessionDeltaLevel = 8,
+                sessionDurationMinutes = 143
+            )
+            BatteryDebugPreset.FULL -> BatteryDebugState(
+                enabled = true,
+                level = 100,
+                charging = true,
+                full = true,
+                powerSave = false,
+                remainingMah = 3260,
+                currentMa = 0,
+                temperatureC = 29f,
+                learnedFullMah = 3260,
+                cycles = 291f,
+                sessionDeltaLevel = 2,
+                sessionDurationMinutes = 18
+            )
+        }
+        AccessibilityOverlayService.batteryDebugOverrideFlow.value = next
+    }
 
     override fun onCleared() {
         if (battery_receiver_registered) {

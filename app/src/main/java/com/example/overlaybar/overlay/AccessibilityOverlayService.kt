@@ -131,6 +131,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         val weatherRefreshRequests  = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
         val weatherRefreshInFlightFlow = MutableStateFlow(false)
         val compassHeadingDegreesFlow = MutableStateFlow<Float?>(null)
+        val batteryDebugOverrideFlow = MutableStateFlow(BatteryDebugState())
 
         // Legacy/Direct access (will be migrated or kept as aliases if needed)
         val pillBoundsFlow = MutableStateFlow<android.graphics.Rect?>(null)
@@ -200,74 +201,7 @@ class AccessibilityOverlayService : AccessibilityService() {
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            intent ?: return
-            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-            val plugType = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            val temperature = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
-
-            val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-            val mahRemaining = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER).takeIf { it != Int.MIN_VALUE }?.let { it / 1000 }
-            } else null
-            val currentMa = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW).takeIf { it != Int.MIN_VALUE }?.let { it / 1000 }
-            } else null
-
-            val currentLevel = if (level >= 0 && scale > 0) (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100) else 100
-            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-            val now = System.currentTimeMillis()
-            refresh_cached_battery_capabilities()
-            val previousSessionCharging = activeBatterySessionCharging
-            if (previousSessionCharging == null) {
-                start_battery_session(currentLevel, mahRemaining, now, isCharging)
-            } else if (previousSessionCharging != isCharging) {
-                finalize_battery_session(currentLevel, mahRemaining)
-                start_battery_session(currentLevel, mahRemaining, now, isCharging)
-            }
-
-            val sessionDeltaLevel = activeBatterySessionStartLevel
-                ?.let { abs(currentLevel - it) }
-                ?.takeIf { it >= 1 }
-            val sessionDeltaMah = activeBatterySessionStartMah
-                ?.let { startMah -> mahRemaining?.let { abs(it - startMah) } }
-                ?.takeIf { it > 20 }
-            val sessionDurationMinutes = activeBatterySessionStartAtMillis
-                ?.let { ((now - it) / 60_000L).toInt().coerceAtLeast(0) }
-                ?.takeIf { it > 0 }
-            val learnedFullMah = compute_learned_capacity_estimate(learnedCapacitySamples)
-            val directCycles = sysfsCycleCount?.takeIf { it > 0 }?.toFloat()
-            val manualCycles = batteryManualCycles.takeIf { it >= 1f }
-            val cycleValue = directCycles ?: manualCycles
-            val cycleSource = when {
-                directCycles != null -> "device reported cycles"
-                manualCycles != null -> "recorded charge cycles"
-                else -> null
-            }
-            val powerSave = (getSystemService(POWER_SERVICE) as? PowerManager)?.isPowerSaveMode == true
-
-            batterySnapshotFlow.value = batterySnapshotFlow.value.copy(
-                level = currentLevel,
-                charging = isCharging,
-                full = status == BatteryManager.BATTERY_STATUS_FULL,
-                plug_type = plugType,
-                temperature_c = temperature,
-                mah_remaining = mahRemaining,
-                current_ma = currentMa,
-                power_save = powerSave,
-                design_mah = sysfsDesignMah,
-                full_mah = sysfsFullMah,
-                learned_full_mah = learnedFullMah,
-                learned_sample_count = learnedCapacitySamples.size,
-                direct_health = null,
-                cycles = cycleValue,
-                cycle_source = cycleSource,
-                session_delta_mah = sessionDeltaMah,
-                session_delta_level = sessionDeltaLevel,
-                session_duration_minutes = sessionDurationMinutes,
-                session_charging = isCharging
-            )
+            refresh_battery_snapshot(intent)
         }
     }
 
@@ -277,6 +211,7 @@ class AccessibilityOverlayService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         scope.launch { hydrate_battery_recovery_state() }
         register_battery_receiver_if_needed()
+        scope.launch { start_battery_refresh_loop() }
         register_timer_alarm_receiver()
         start_compass_updates()
         scope.launch { show_overlay() }
@@ -343,7 +278,105 @@ class AccessibilityOverlayService : AccessibilityService() {
             registerReceiver(batteryReceiver, filter)
         }
         batteryReceiverRegistered = true
-        registerReceiver(null, filter)?.let { batteryReceiver.onReceive(this, it) }
+        refresh_battery_snapshot(registerReceiver(null, filter))
+    }
+
+    private fun refresh_battery_snapshot(intent: Intent? = read_sticky_battery_intent()) {
+        intent ?: return
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val plugType = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+        val temperature = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
+
+        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+        val mahRemaining = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+                .takeIf { it != Int.MIN_VALUE }
+                ?.let { it / 1000 }
+        } else null
+        val currentMa = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                .takeIf { it != Int.MIN_VALUE }
+                ?.let { it / 1000 }
+        } else null
+
+        val currentLevel = if (level >= 0 && scale > 0) {
+            (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100)
+        } else {
+            batterySnapshotFlow.value.level
+        }
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        val now = System.currentTimeMillis()
+        refresh_cached_battery_capabilities()
+        val previousSessionCharging = activeBatterySessionCharging
+        if (previousSessionCharging == null) {
+            start_battery_session(currentLevel, mahRemaining, now, isCharging)
+        } else if (previousSessionCharging != isCharging) {
+            finalize_battery_session(currentLevel, mahRemaining)
+            start_battery_session(currentLevel, mahRemaining, now, isCharging)
+        }
+
+        val sessionDeltaLevel = activeBatterySessionStartLevel
+            ?.let { abs(currentLevel - it) }
+            ?.takeIf { it >= 1 }
+        val sessionDeltaMah = activeBatterySessionStartMah
+            ?.let { startMah -> mahRemaining?.let { abs(it - startMah) } }
+            ?.takeIf { it > 20 }
+        val sessionDurationMinutes = activeBatterySessionStartAtMillis
+            ?.let { ((now - it) / 60_000L).toInt().coerceAtLeast(0) }
+            ?.takeIf { it > 0 }
+        val learnedFullMah = compute_learned_capacity_estimate(learnedCapacitySamples)
+        val directCycles = sysfsCycleCount?.takeIf { it > 0 }?.toFloat()
+        val manualCycles = batteryManualCycles.takeIf { it >= 1f }
+        val cycleValue = directCycles ?: manualCycles
+        val cycleSource = when {
+            directCycles != null -> "device reported cycles"
+            manualCycles != null -> "recorded charge cycles"
+            else -> null
+        }
+        val powerSave = (getSystemService(POWER_SERVICE) as? PowerManager)?.isPowerSaveMode == true
+
+        batterySnapshotFlow.value = batterySnapshotFlow.value.copy(
+            level = currentLevel,
+            charging = isCharging,
+            full = status == BatteryManager.BATTERY_STATUS_FULL,
+            plug_type = plugType,
+            temperature_c = temperature,
+            mah_remaining = mahRemaining,
+            current_ma = currentMa,
+            power_save = powerSave,
+            design_mah = sysfsDesignMah,
+            full_mah = sysfsFullMah,
+            learned_full_mah = learnedFullMah,
+            learned_sample_count = learnedCapacitySamples.size,
+            direct_health = null,
+            cycles = cycleValue,
+            cycle_source = cycleSource,
+            session_delta_mah = sessionDeltaMah,
+            session_delta_level = sessionDeltaLevel,
+            session_duration_minutes = sessionDurationMinutes,
+            session_charging = isCharging,
+            updated_at_millis = now
+        )
+    }
+
+    private fun read_sticky_battery_intent(): Intent? =
+        registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+    private suspend fun start_battery_refresh_loop() {
+        while (true) {
+            val snapshot = batterySnapshotFlow.value
+            val expandedBattery = expandedElementFlow.value == OverlayElementId.BATTERY
+            delay(
+                when {
+                    expandedBattery -> 5_000L
+                    !snapshot.charging -> 15_000L
+                    else -> 30_000L
+                }
+            )
+            refresh_battery_snapshot()
+        }
     }
 
     private fun register_timer_alarm_receiver() {
@@ -548,11 +581,13 @@ class AccessibilityOverlayService : AccessibilityService() {
             setContent {
                 val settings by prefs.overlay_settings.collectAsState(initial = OverlaySettingsSnapshot())
                 val battery by batterySnapshotFlow.collectAsState()
+                val batteryDebug by batteryDebugOverrideFlow.collectAsState()
+                val resolvedBattery = if (batteryDebug.enabled) batteryDebug.apply_to(battery) else battery
 
                 if (settings.enabled) {
                     status_bar_overlay(
                         config = settings,
-                        battery_snapshot = battery,
+                        battery_snapshot = resolvedBattery,
                         fade_height_dp = OVERLAY_FADE_HEIGHT_DP
                     )
                 }
@@ -1356,6 +1391,10 @@ class AccessibilityOverlayService : AccessibilityService() {
 
     private fun update_touch_windows(regions: Map<OverlayElementId, android.graphics.Rect>, expandedId: OverlayElementId?) {
         val wm = wm ?: return
+        if (expandedId != null) {
+            remove_all_touch_windows()
+            return
+        }
         val touchPaddingXPx = (10 * resources.displayMetrics.density).toInt()
         val touchPaddingYPx = (8 * resources.displayMetrics.density).toInt()
         val touchRects = regions.mapValues { (_, rect) ->

@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
                 factory = SettingsViewModelFactory(applicationContext)
             )
             val ui_state = settings_view_model.ui_state.collectAsStateWithLifecycle()
+            val battery_debug_state = settings_view_model.battery_debug_state.collectAsStateWithLifecycle()
             val settings = ui_state.value.settings
             val theme_mode = settings.themeMode
             val dark_theme = resolve_dark_theme(theme_mode, isSystemInDarkTheme())
@@ -64,6 +65,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     settings_screen(
                         settings = settings,
+                        battery_debug_state = battery_debug_state.value,
                         selected_element_id = ui_state.value.selectedElementId,
                         needs_accessibility_setup = ui_state.value.needsAccessibilitySetup,
                         has_location_permission = ui_state.value.hasLocationPermission,

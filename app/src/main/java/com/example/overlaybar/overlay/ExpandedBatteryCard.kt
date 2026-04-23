@@ -34,6 +34,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,8 +55,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlin.random.Random
 
-private const val BATTERY_INSIGHTS_VISIBLE = 8
+private const val BATTERY_VISIBLE_INSIGHT_SLOTS = 4
 
 
 /// Functions
@@ -69,13 +72,46 @@ internal fun expanded_battery_card(
 ) {
     val level_color = battery_level_color(battery_snapshot.level, battery_snapshot.charging, battery_snapshot.full)
     val dim = text_color.copy(alpha = 0.56f)
-    val resolved_remaining = battery_snapshot.displayed_mah_remaining
-    val resolved_runtime_minutes = if (battery_snapshot.charging) battery_snapshot.time_to_full_minutes else battery_snapshot.time_remaining_minutes
+    var nowMillis by remember(
+        battery_snapshot.updated_at_millis,
+        battery_snapshot.current_ma,
+        battery_snapshot.charging
+    ) { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(
+        battery_snapshot.updated_at_millis,
+        battery_snapshot.current_ma,
+        battery_snapshot.charging,
+        battery_snapshot.full
+    ) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            delay(if (battery_snapshot.current_ma != null) 5_000L else 15_000L)
+        }
+    }
+    val resolved_remaining = battery_snapshot.projected_mah_remaining(nowMillis)
+    val resolved_runtime_minutes = battery_snapshot.projected_runtime_minutes(nowMillis)
+    val cycle_footer = remember(battery_snapshot.cycles, battery_snapshot.cycle_source) {
+        buildString {
+            battery_snapshot.cycles?.let { count ->
+                append(format_cycle_count(count))
+                battery_snapshot.cycle_source?.takeIf { it.isNotBlank() }?.let { source ->
+                    append(" · ")
+                    append(source)
+                }
+            } ?: run {
+                append("Cycles unavailable")
+                if (battery_snapshot.learned_sample_count > 0) {
+                    append(" · ")
+                    append("${battery_snapshot.learned_sample_count} health samples")
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 8.dp)
     ) {
         // Header row: "Battery" label + charge source
         Row(
@@ -177,6 +213,15 @@ internal fun expanded_battery_card(
 
         // Insight sub-card with cycling fade
         insight_sub_card(battery_snapshot, text_color, dim, level_color, font_family, font_scale)
+
+        Text(
+            text = cycle_footer,
+            color = dim,
+            fontSize = (10f * font_scale).sp,
+            fontFamily = font_family,
+            fontWeight = FontWeight.Normal,
+            letterSpacing = 0.sp
+        )
     }
 }
 
@@ -189,10 +234,11 @@ private fun primary_stats_row(
     dim: Color,
     fontFamily: FontFamily,
     fontScale: Float
-) {
+    ) {
     val mah_text = resolved_remaining_mah?.let { "${format_mah(it)} mAh" } ?: "—"
     val rate_ma  = if (battery.charging) battery.charge_ma else battery.drain_ma
     val rate_text = when {
+        battery.full -> "100%"
         rate_ma != null -> {
             val arrow = if (battery.charging) "↑" else "↓"
             "$arrow ${format_mah(rate_ma)}mA"
@@ -208,7 +254,10 @@ private fun primary_stats_row(
         battery.charging -> "charging"
         else -> "draining"
     }
-    val time_text = resolved_runtime_minutes?.let { format_duration_minutes(it) } ?: "—"
+    val time_text = when {
+        battery.full -> "Now"
+        else -> resolved_runtime_minutes?.let { format_duration_minutes(it) } ?: "—"
+    }
     val time_label = when {
         battery.full -> "charged"
         battery.charging -> "to full"
@@ -263,27 +312,27 @@ private fun insight_sub_card(
     val insights = remember(battery) { compute_battery_insights(battery) }
     if (insights.isEmpty()) return
 
-    var cycle_count by remember { mutableIntStateOf(0) }
-    val page_count = ((insights.size + BATTERY_INSIGHTS_VISIBLE - 1) / BATTERY_INSIGHTS_VISIBLE).coerceAtLeast(1)
-    val visible_insights = if (insights.size <= BATTERY_INSIGHTS_VISIBLE) {
-        insights
-    } else {
-        val page = cycle_count % page_count
-        insights.drop(page * BATTERY_INSIGHTS_VISIBLE).take(BATTERY_INSIGHTS_VISIBLE)
+    val visible_insights = remember(insights) {
+        mutableStateListOf<BatteryInsight>().apply {
+            addAll(initial_visible_battery_insights(insights))
+        }
     }
+    var auto_cycle_slot by remember(insights) { mutableIntStateOf(0) }
 
-    LaunchedEffect(page_count, cycle_count) {
-        if (page_count <= 1) return@LaunchedEffect
-        delay(4000L)
-        cycle_count = (cycle_count + 1) % page_count
+    LaunchedEffect(insights) {
+        if (insights.size <= BATTERY_VISIBLE_INSIGHT_SLOTS) return@LaunchedEffect
+        while (true) {
+            delay(4000L)
+            val slot = auto_cycle_slot % visible_insights.size.coerceAtLeast(1)
+            val replacement = pick_replacement_battery_insight(
+                pool = insights,
+                visible = visible_insights,
+                replace_index = slot
+            ) ?: continue
+            visible_insights[slot] = replacement
+            auto_cycle_slot = (slot + 1) % visible_insights.size
+        }
     }
-
-    val click_modifier = if (page_count > 1) Modifier.clickable(
-        interactionSource = remember { MutableInteractionSource() },
-        indication = null
-    ) {
-        cycle_count = (cycle_count + 1) % page_count
-    } else Modifier
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -297,7 +346,8 @@ private fun insight_sub_card(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    row_items.forEach { insight ->
+                    row_items.forEachIndexed { column_index, insight ->
+                        val slotIndex = start + column_index
                         insight_panel(
                             insight = insight,
                             text_color = text_color,
@@ -305,7 +355,18 @@ private fun insight_sub_card(
                             accent = accent,
                             fontFamily = fontFamily,
                             fontScale = fontScale,
-                            modifier = Modifier.weight(1f).then(click_modifier)
+                            modifier = Modifier.weight(1f),
+                            onTap = if (insights.size > BATTERY_VISIBLE_INSIGHT_SLOTS) {
+                                {
+                                    pick_replacement_battery_insight(
+                                        pool = insights,
+                                        visible = visible_insights,
+                                        replace_index = slotIndex
+                                    )?.let { replacement ->
+                                        visible_insights[slotIndex] = replacement
+                                    }
+                                }
+                            } else null
                         )
                     }
                     repeat(2 - row_items.size) {
@@ -315,11 +376,11 @@ private fun insight_sub_card(
             }
         }
 
-        if (page_count > 1) {
+        if (insights.size > BATTERY_VISIBLE_INSIGHT_SLOTS) {
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 dot_indicator(
-                    count = page_count,
-                    active = cycle_count % page_count,
+                    count = visible_insights.size,
+                    active = auto_cycle_slot % visible_insights.size.coerceAtLeast(1),
                     dim = dim,
                     accent = accent
                 )
@@ -336,7 +397,8 @@ private fun insight_panel(
     accent: Color,
     fontFamily: FontFamily,
     fontScale: Float,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTap: (() -> Unit)? = null
 ) {
     Box(
         modifier = modifier
@@ -344,6 +406,17 @@ private fun insight_panel(
             .clip(RoundedCornerShape(12.dp))
             .drawBehind { draw_frosted_glass_noise(intensity = 0.42f) }
             .background(text_color.copy(alpha = 0.055f), RoundedCornerShape(12.dp))
+            .then(
+                if (onTap != null) {
+                    Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onTap
+                    )
+                } else {
+                    Modifier
+                }
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -359,7 +432,7 @@ private fun insight_panel(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                insight_graphic(current_insight.kind, accent, dim)
+                insight_graphic(current_insight, accent, dim)
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(1.dp)
@@ -389,7 +462,7 @@ private fun insight_panel(
 }
 
 @Composable
-private fun insight_graphic(kind: InsightKind, accent: Color, dim: Color) {
+private fun insight_graphic(insight: BatteryInsight, accent: Color, dim: Color) {
     Box(
         modifier = Modifier
             .size(34.dp)
@@ -397,14 +470,16 @@ private fun insight_graphic(kind: InsightKind, accent: Color, dim: Color) {
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(20.dp)) {
-            when (kind) {
-                InsightKind.CHARGED_IN, InsightKind.SPEED -> draw_bolt(accent)
-                InsightKind.DRAINED_OUT -> draw_down_arrow(accent)
-                InsightKind.CAPACITY    -> draw_capacity_glyph(accent)
-                InsightKind.WARMTH      -> draw_thermometer(accent)
-                InsightKind.POWER_SAVE  -> draw_leaf(accent)
-                InsightKind.RATE        -> draw_pulse(accent)
-                InsightKind.LEVEL_DELTA -> draw_level_change(accent)
+            val progress = insight.primary_fraction ?: 0.5f
+            when (insight.kind) {
+                InsightKind.CHARGED_IN -> draw_session_transfer(accent, progress, charging = true)
+                InsightKind.DRAINED_OUT -> draw_session_transfer(accent, progress, charging = false)
+                InsightKind.CAPACITY    -> draw_capacity_glyph(accent, progress)
+                InsightKind.WARMTH      -> draw_thermometer(accent, progress)
+                InsightKind.POWER_SAVE  -> draw_leaf(accent, insight.active)
+                InsightKind.RATE        -> draw_pulse(accent, progress)
+                InsightKind.LEVEL_DELTA -> draw_level_change(accent, progress)
+                InsightKind.SPEED       -> draw_bolt(accent, progress)
             }
         }
     }
@@ -483,8 +558,21 @@ private fun stat_divider(color: Color) {
 
 // --- Graphics ---
 
-private fun DrawScope.draw_bolt(color: Color) {
+private fun DrawScope.draw_bolt(color: Color, progress: Float = 1f) {
     val w = size.width; val h = size.height
+    val clamped = progress.coerceIn(0f, 1f)
+    drawRoundRect(
+        color = color.copy(alpha = 0.14f),
+        topLeft = Offset(w * 0.12f, h * 0.76f),
+        size = androidx.compose.ui.geometry.Size(w * 0.76f, h * 0.10f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.06f)
+    )
+    drawRoundRect(
+        color = color.copy(alpha = 0.45f),
+        topLeft = Offset(w * 0.12f, h * 0.76f),
+        size = androidx.compose.ui.geometry.Size(w * 0.76f * clamped, h * 0.10f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.06f)
+    )
     val path = Path().apply {
         moveTo(w * 0.54f, 0f)
         lineTo(w * 0.18f, h * 0.56f)
@@ -497,40 +585,60 @@ private fun DrawScope.draw_bolt(color: Color) {
     drawPath(path, color)
 } // draw_bolt
 
-private fun DrawScope.draw_down_arrow(color: Color) {
+private fun DrawScope.draw_down_arrow(color: Color, progress: Float = 1f) {
     val w = size.width; val h = size.height
+    drawRoundRect(
+        color = color.copy(alpha = 0.14f),
+        topLeft = Offset(w * 0.12f, h * 0.74f),
+        size = androidx.compose.ui.geometry.Size(w * 0.76f, h * 0.10f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.06f)
+    )
+    drawRoundRect(
+        color = color.copy(alpha = 0.45f),
+        topLeft = Offset(w * 0.12f, h * 0.74f),
+        size = androidx.compose.ui.geometry.Size(w * 0.76f * progress.coerceIn(0f, 1f), h * 0.10f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.06f)
+    )
     drawLine(color, Offset(w * 0.5f, 0f), Offset(w * 0.5f, h * 0.85f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
     drawLine(color, Offset(w * 0.5f, h * 0.85f), Offset(w * 0.22f, h * 0.55f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
     drawLine(color, Offset(w * 0.5f, h * 0.85f), Offset(w * 0.78f, h * 0.55f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
 } // draw_down_arrow
 
-private fun DrawScope.draw_capacity_glyph(color: Color) {
+private fun DrawScope.draw_session_transfer(color: Color, progress: Float, charging: Boolean) {
+    if (charging) draw_bolt(color, progress) else draw_down_arrow(color, progress)
+}
+
+private fun DrawScope.draw_capacity_glyph(color: Color, progress: Float) {
     val w = size.width; val h = size.height
-    val body = Rect(w * 0.12f, h * 0.20f, w * 0.82f, h * 0.88f)
+    val body = Rect(w * 0.08f, h * 0.28f, w * 0.78f, h * 0.72f)
     drawRoundRect(
         color = color,
         topLeft = Offset(body.left, body.top),
         size = androidx.compose.ui.geometry.Size(body.width, body.height),
-        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.10f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.12f),
         style = Stroke(width = h * 0.10f)
     )
     drawRoundRect(
         color = color.copy(alpha = 0.45f),
-        topLeft = Offset(body.left + h * 0.10f, body.top + h * 0.10f + body.height * 0.18f),
-        size = androidx.compose.ui.geometry.Size(body.width - h * 0.20f, body.height * 0.70f),
+        topLeft = Offset(body.left + h * 0.10f, body.top + h * 0.10f),
+        size = androidx.compose.ui.geometry.Size(
+            (body.width - h * 0.24f) * progress.coerceIn(0f, 1f),
+            body.height - h * 0.20f
+        ),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.06f)
     )
     drawRoundRect(
         color = color,
-        topLeft = Offset(w * 0.82f, h * 0.40f),
-        size = androidx.compose.ui.geometry.Size(w * 0.10f, h * 0.28f),
+        topLeft = Offset(w * 0.78f, h * 0.38f),
+        size = androidx.compose.ui.geometry.Size(w * 0.12f, h * 0.24f),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(h * 0.04f)
     )
 } // draw_capacity_glyph
 
-private fun DrawScope.draw_thermometer(color: Color) {
+private fun DrawScope.draw_thermometer(color: Color, progress: Float) {
     val w = size.width; val h = size.height
     val stemX = w * 0.5f
+    val fillTop = h * (0.74f - 0.40f * progress.coerceIn(0f, 1f))
     drawRoundRect(
         color = color,
         topLeft = Offset(stemX - w * 0.08f, h * 0.12f),
@@ -539,10 +647,11 @@ private fun DrawScope.draw_thermometer(color: Color) {
         style = Stroke(width = h * 0.10f)
     )
     drawCircle(color, radius = h * 0.16f, center = Offset(stemX, h * 0.82f))
-    drawLine(color, Offset(stemX, h * 0.36f), Offset(stemX, h * 0.74f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
+    drawLine(color.copy(alpha = 0.22f), Offset(stemX, h * 0.22f), Offset(stemX, h * 0.74f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
+    drawLine(color, Offset(stemX, fillTop), Offset(stemX, h * 0.74f), strokeWidth = h * 0.14f, cap = StrokeCap.Round)
 } // draw_thermometer
 
-private fun DrawScope.draw_leaf(color: Color) {
+private fun DrawScope.draw_leaf(color: Color, active: Boolean) {
     val w = size.width; val h = size.height
     val path = Path().apply {
         moveTo(w * 0.10f, h * 0.88f)
@@ -550,47 +659,90 @@ private fun DrawScope.draw_leaf(color: Color) {
         cubicTo(w * 0.90f, h * 0.60f, w * 0.62f, h * 0.92f, w * 0.10f, h * 0.88f)
         close()
     }
-    drawPath(path, color)
-    drawLine(color.copy(alpha = 0.6f), Offset(w * 0.12f, h * 0.86f), Offset(w * 0.86f, h * 0.14f), strokeWidth = h * 0.06f, cap = StrokeCap.Round)
+    drawPath(path, if (active) color.copy(alpha = 0.92f) else color.copy(alpha = 0.28f))
+    drawLine(color.copy(alpha = if (active) 0.7f else 0.4f), Offset(w * 0.12f, h * 0.86f), Offset(w * 0.86f, h * 0.14f), strokeWidth = h * 0.06f, cap = StrokeCap.Round)
+    drawCircle(
+        color = if (active) color else color.copy(alpha = 0.22f),
+        radius = h * 0.08f,
+        center = Offset(w * 0.84f, h * 0.22f)
+    )
 } // draw_leaf
 
-private fun DrawScope.draw_pulse(color: Color) {
+private fun DrawScope.draw_pulse(color: Color, progress: Float) {
     val w = size.width; val h = size.height
+    val amplitude = (0.14f + 0.26f * progress.coerceIn(0f, 1f)) * h
     val path = Path().apply {
         moveTo(0f, h * 0.5f)
         lineTo(w * 0.25f, h * 0.5f)
-        lineTo(w * 0.35f, h * 0.15f)
-        lineTo(w * 0.50f, h * 0.85f)
+        lineTo(w * 0.35f, h * 0.5f - amplitude)
+        lineTo(w * 0.50f, h * 0.5f + amplitude)
         lineTo(w * 0.65f, h * 0.5f)
         lineTo(w, h * 0.5f)
     }
     drawPath(path, color, style = Stroke(width = h * 0.14f, cap = StrokeCap.Round))
 } // draw_pulse
 
-private fun DrawScope.draw_level_change(color: Color) {
+private fun DrawScope.draw_level_change(color: Color, progress: Float) {
     val w = size.width; val h = size.height
-    // Two vertical bars, second taller
     drawRoundRect(
-        color = color.copy(alpha = 0.55f),
-        topLeft = Offset(w * 0.15f, h * 0.52f),
-        size = androidx.compose.ui.geometry.Size(w * 0.25f, h * 0.40f),
+        color = color.copy(alpha = 0.18f),
+        topLeft = Offset(w * 0.10f, h * 0.28f),
+        size = androidx.compose.ui.geometry.Size(w * 0.64f, h * 0.16f),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.05f)
     )
     drawRoundRect(
         color = color,
-        topLeft = Offset(w * 0.55f, h * 0.18f),
-        size = androidx.compose.ui.geometry.Size(w * 0.25f, h * 0.74f),
+        topLeft = Offset(w * 0.10f, h * 0.28f),
+        size = androidx.compose.ui.geometry.Size(w * 0.64f * progress.coerceIn(0f, 1f), h * 0.16f),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.05f)
+    )
+    drawRoundRect(
+        color = color.copy(alpha = 0.34f),
+        topLeft = Offset(w * 0.18f, h * 0.56f),
+        size = androidx.compose.ui.geometry.Size(w * 0.72f * progress.coerceIn(0.12f, 1f), h * 0.14f),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.05f)
     )
 } // draw_level_change
 
 internal fun battery_level_color(level: Int, charging: Boolean, full: Boolean = false): Color = when {
     full || level >= 100 -> Color(0xFF4DA3FF)
-    charging    -> Color(0xFF34C759)
-    level <= 15 -> Color(0xFFFF453A)
-    level <= 45 -> Color(0xFFFFC857)
-    else        -> Color(0xFF34C759)
+    charging -> Color(0xFF34C759)
+    else -> {
+        val clamped = level.coerceIn(0, 100) / 100f
+        when {
+            clamped >= 0.60f -> lerp_color(
+                Color(0xFF34C759),
+                Color(0xFF4DA3FF),
+                ((clamped - 0.60f) / 0.40f).coerceIn(0f, 1f)
+            )
+            clamped >= 0.25f -> lerp_color(
+                Color(0xFFFFC857),
+                Color(0xFF34C759),
+                ((clamped - 0.25f) / 0.35f).coerceIn(0f, 1f)
+            )
+            else -> lerp_color(
+                Color(0xFFFF453A),
+                Color(0xFFFFC857),
+                (clamped / 0.25f).coerceIn(0f, 1f)
+            )
+        }
+    }
 }
 
 
 fun androidx.compose.ui.graphics.drawscope.DrawScope.draw_frosted_glass_noise(intensity: Float = 0.05f) { }
+
+private fun initial_visible_battery_insights(pool: List<BatteryInsight>): List<BatteryInsight> =
+    pool.take(BATTERY_VISIBLE_INSIGHT_SLOTS)
+
+private fun pick_replacement_battery_insight(
+    pool: List<BatteryInsight>,
+    visible: List<BatteryInsight>,
+    replace_index: Int
+): BatteryInsight? {
+    val current = visible.getOrNull(replace_index)
+    val blocked = visible.filterIndexed { index, _ -> index != replace_index }.toSet()
+    val candidates = pool.filter { it !in blocked && it != current }
+    if (candidates.isEmpty()) return null
+    return candidates[Random.nextInt(candidates.size)]
+}

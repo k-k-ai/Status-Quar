@@ -259,8 +259,13 @@ fun status_bar_overlay(
             })
         }
         val bs = config.resolvedBatterySettings
+        val batteryStrokeColor = battery_level_color(
+            level = battery_snapshot.level,
+            charging = battery_snapshot.charging,
+            full = battery_snapshot.full
+        )
         if (config.showBattery && bs.alignment == ALIGN_LEFT) {
-            add(buildLaneEntry(OverlayElementId.BATTERY, bs, parse_hex_color(bs.pillColor), parse_hex_color(bs.pillStrokeColor), -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
+            add(buildLaneEntry(OverlayElementId.BATTERY, bs, null, batteryStrokeColor, -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
@@ -319,8 +324,13 @@ fun status_bar_overlay(
             })
         }
         val bs = config.resolvedBatterySettings
+        val batteryStrokeColor = battery_level_color(
+            level = battery_snapshot.level,
+            charging = battery_snapshot.charging,
+            full = battery_snapshot.full
+        )
         if (config.showBattery && bs.alignment != ALIGN_LEFT) {
-            add(buildLaneEntry(OverlayElementId.BATTERY, bs, parse_hex_color(bs.pillColor), parse_hex_color(bs.pillStrokeColor), -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
+            add(buildLaneEntry(OverlayElementId.BATTERY, bs, null, batteryStrokeColor, -1, if (hiddenElementId == OverlayElementId.BATTERY) 0f else 1f) {
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
@@ -427,18 +437,36 @@ fun status_bar_overlay(
                 OverlayElementId.WEATHER -> 186.dp
                 OverlayElementId.GIF -> 324.dp
                 OverlayElementId.TIME -> 290.dp
-                OverlayElementId.BATTERY -> 300.dp
+                OverlayElementId.BATTERY -> 336.dp
                 else -> 100.dp
             }
             val useWeatherColors = (expandedId == OverlayElementId.WEATHER && isWeatherImmersive)
+            val useBatteryColors = expandedId == OverlayElementId.BATTERY
             val fill = if (useWeatherColors) (weatherFill ?: lane_fill) else lane_fill
-            val stroke = if (useWeatherColors) (weatherStroke ?: lane_border) else lane_border
+            val stroke = when {
+                useWeatherColors -> weatherStroke ?: lane_border
+                useBatteryColors -> expandedEntry?.customStroke ?: lane_border
+                else -> lane_border
+            }
             val contentColor = if (useWeatherColors) weatherTextColor else text_color
             val surfaceAlpha = when (expandedId) {
                 OverlayElementId.GIF -> 0.34f
                 OverlayElementId.TIME -> 0.995f
                 OverlayElementId.WEATHER -> 0.94f
                 else -> 0.98f
+            }
+
+            if (editor == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            AccessibilityOverlayService.expandedElementFlow.value = null
+                        }
+                )
             }
 
             MorphingSurface(
@@ -452,6 +480,7 @@ fun status_bar_overlay(
                 pillScale = expandedEntry?.pillScale ?: 1f,
                 backdropType = expandedEntry?.backdropType ?: -1,
                 fillAlpha = surfaceAlpha,
+                batteryLevelSlice = expandedEntry?.battery_level_slice ?: -1f,
                 solarBrightness = solarBrightness,
                 clearWayheadProgress = clearWayheadProgress,
                 onClose = { if (editor == null) AccessibilityOverlayService.expandedElementFlow.value = null else localExpandedId = null },
@@ -581,6 +610,7 @@ private fun MorphingSurface(
     pillScale: Float = 1f,
     backdropType: Int = -1,
     fillAlpha: Float = 0.97f,
+    batteryLevelSlice: Float = -1f,
     solarBrightness: Float = 1f,
     clearWayheadProgress: Float = 0.5f,
     onClose: () -> Unit,
@@ -667,8 +697,12 @@ private fun MorphingSurface(
             )
             .onGloballyPositioned { onCardBoundsChanged?.invoke(it.boundsInRoot()) }
             .graphicsLayer { alpha = cardProgress.coerceIn(0.01f, 1f) }
-            .background(fill.copy(alpha = fill.alpha * fillAlpha), RoundedCornerShape(currentCorner))
-            .border(1.5.dp, stroke, RoundedCornerShape(currentCorner))
+            .morphing_surface_shell(
+                fill = fill.copy(alpha = fill.alpha * fillAlpha),
+                stroke = stroke,
+                corner = currentCorner,
+                batteryLevelSlice = batteryLevelSlice
+            )
     ) {
         content(animProgress, cardProgress)
     }
@@ -678,8 +712,12 @@ private fun MorphingSurface(
                 .offset(x = travelingPillRectLeft, y = travelingPillRectTop)
                 .size(travelingPillWidth, travelingPillHeight)
                 .graphicsLayer { alpha = travelingPillAlpha }
-                .background(fill, RoundedCornerShape(travelingCorner))
-                .border(1.5.dp, stroke, RoundedCornerShape(travelingCorner)),
+                .morphing_surface_shell(
+                    fill = fill,
+                    stroke = stroke,
+                    corner = travelingCorner,
+                    batteryLevelSlice = batteryLevelSlice
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (backdropType != -1) {
@@ -704,6 +742,32 @@ private fun MorphingSurface(
                 pillContent()
             }
         }
+    }
+}
+
+private fun Modifier.morphing_surface_shell(
+    fill: Color,
+    stroke: Color,
+    corner: Dp,
+    batteryLevelSlice: Float
+): Modifier = drawBehind {
+    val cornerPx = corner.toPx()
+    val path = Path().apply {
+        addRoundRect(RoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx))
+    }
+    val outlinePath = build_round_rect_outline_path(size.width, size.height, cornerPx)
+    drawPath(path, color = fill)
+    if (batteryLevelSlice in 0f..1f) {
+        draw_battery_level_stroke(
+            width = size.width,
+            height = size.height,
+            corner = cornerPx,
+            active_color = stroke,
+            level_slice = batteryLevelSlice,
+            stroke_width = 1.5.dp.toPx()
+        )
+    } else {
+        drawPath(outlinePath, color = stroke, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round))
     }
 }
 
