@@ -37,9 +37,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -171,7 +169,23 @@ internal fun BoxScope.overlay_lane(
                             if (entry.timerArcProgress >= 0f)
                                 Modifier.drawWithContent {
                                     drawContent()
-                                    drawTimerArc(entry.timerArcProgress, 2.5.dp.toPx())
+                                    val progress = entry.timerArcProgress.coerceIn(0f, 1f)
+                                    if (progress > 0f) {
+                                        val strokeWidth = 2.5.dp.toPx()
+                                        val inset = strokeWidth / 2f
+                                        drawArc(
+                                            color = Color(0x60FF3B3B),
+                                            startAngle = -90f,
+                                            sweepAngle = 360f * progress,
+                                            useCenter = false,
+                                            topLeft = Offset(inset, inset),
+                                            size = Size(
+                                                (size.width - strokeWidth).coerceAtLeast(0f),
+                                                (size.height - strokeWidth).coerceAtLeast(0f)
+                                            ),
+                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                                        )
+                                    }
                                 }
                             else Modifier
                         )
@@ -296,24 +310,3 @@ internal fun Modifier.lane_surface(
         .padding(horizontal = h_pad)
 } // lane_surface
 
-internal fun DrawScope.drawTimerArc(progress: Float, strokeWidthPx: Float) {
-    if (progress <= 0f) return
-    val w = size.width
-    val h = size.height
-    val r = h / 2f
-    val path = Path().apply {
-        moveTo(w / 2f, 0f)
-        lineTo(r, 0f)
-        arcTo(Rect(0f, 0f, 2f * r, h), startAngleDegrees = -90f, sweepAngleDegrees = -180f, forceMoveTo = false)
-        lineTo(w - r, h)
-        arcTo(Rect(w - 2f * r, 0f, w, h), startAngleDegrees = 90f, sweepAngleDegrees = -180f, forceMoveTo = false)
-        lineTo(w / 2f, 0f)
-    }
-    val measure = PathMeasure()
-    measure.setPath(path, false)
-    val totalLen = measure.length
-    if (totalLen <= 0f) return
-    val seg = Path()
-    measure.getSegment(0f, progress * totalLen, seg, true)
-    drawPath(seg, Color(0x60FF3B3B), style = Stroke(width = strokeWidthPx, cap = StrokeCap.Round))
-} // drawTimerArc
