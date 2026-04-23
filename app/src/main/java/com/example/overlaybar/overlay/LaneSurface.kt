@@ -33,12 +33,14 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
@@ -67,6 +69,7 @@ internal data class OverlayLaneEntry(
     val backdropType: Int = -1,
     val alpha: Float = 1f,
     val timerArcProgress: Float = -1f,
+    val battery_level_slice: Float = -1f,
     val onTap: (() -> Unit)? = null,
     val content: @Composable () -> Unit
 )
@@ -174,13 +177,14 @@ internal fun BoxScope.overlay_lane(
                             pill_scale = entry.pillScale,
                             backdrop = entry.backdropType,
                             solarBrightness = solarBrightness,
-                            clearWayheadProgress = clearWayheadProgress
+                            clearWayheadProgress = clearWayheadProgress,
+                            battery_level_slice = entry.battery_level_slice
                         )
                         .onGloballyPositioned { onReportBounds(entry.id, it.boundsInRoot()) }
                         .then(if (entry.onTap != null) Modifier.clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { entry.onTap.invoke() } else Modifier),
+                        ) { entry.onTap() } else Modifier),
                     contentAlignment = Alignment.Center
                 ) {
                     val itemContent = entry.content
@@ -198,7 +202,8 @@ internal fun Modifier.lane_surface(
     pill_scale: Float,
     backdrop: Int = -1,
     solarBrightness: Float = 1f,
-    clearWayheadProgress: Float = 1f
+    clearWayheadProgress: Float = 1f,
+    battery_level_slice: Float = -1f
 ): Modifier {
     val h_pad = (10 * pill_scale).dp
     val pill_height = (24 * pill_scale).dp
@@ -220,8 +225,23 @@ internal fun Modifier.lane_surface(
                     }
                 }
             }
+            if (border != Color.Transparent) {
+                if (battery_level_slice in 0f..1f) {
+                    // Depleting stroke: right to left
+                    val sliceWidth = size.width * battery_level_slice
+                    clipPath(path) {
+                        drawRect(
+                            color = border,
+                            topLeft = Offset(0f, 0f),
+                            size = Size(sliceWidth, size.height),
+                            style = Stroke(width = 3.dp.toPx())
+                        )
+                    }
+                } else {
+                    drawPath(path, color = border, style = Stroke(width = 3.dp.toPx()))
+                }
+            }
         }
-        .then(if (border != Color.Transparent) Modifier.border(1.5.dp, border, LANE_SHAPE) else Modifier)
         .padding(horizontal = h_pad)
 } // lane_surface
 

@@ -1105,16 +1105,40 @@ class AccessibilityOverlayService : AccessibilityService() {
             val view = existingViews.getOrNull(index) ?: View(this).apply {
                 setBackgroundColor(0x01000000)
                 isClickable = false
+                var downX = 0f
+                var downY = 0f
+                var isSwipe = false
                 setOnTouchListener { _, event ->
                     val tapX = event.rawX.toInt()
                     val tapY = event.rawY.toInt()
+                    
+                    when (event.action) {
+                        MotionEvent.ACTION_DOWN -> {
+                            downX = event.rawX
+                            downY = event.rawY
+                            isSwipe = false
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            if (!isSwipe && (event.rawY - downY > 15 * resources.displayMetrics.density)) {
+                                isSwipe = true
+                            }
+                        }
+                    }
+
                     val expandedTouchId = currentExpandedTouchId
                     val expandedRect = expandedCardBoundsFlow.value ?: expandedTouchId?.let { currentTouchRects[it] }
+                    
+                    if (isSwipe) {
+                        // Pass touch to system (drawer)
+                        return@setOnTouchListener false
+                    }
+
                     if (expandedTouchId != null && expandedRect != null) {
                         if (expandedRect.contains(tapX, tapY)) {
                             false
                         } else {
                             if (event.action == MotionEvent.ACTION_UP) {
+                                playSoundEffect(android.view.SoundEffectConstants.CLICK)
                                 expandedElementFlow.value = null
                             }
                             true
@@ -1125,8 +1149,8 @@ class AccessibilityOverlayService : AccessibilityService() {
                             false
                         } else {
                             if (event.action == MotionEvent.ACTION_UP) {
+                                playSoundEffect(android.view.SoundEffectConstants.CLICK)
                                 if (tappedId == OverlayElementId.TIME && timerAlarmActiveFlow.value) {
-                                    // Suppress alarm in-place — no expand, one green pulse
                                     timerAlarmActiveFlow.value = false
                                     alarmSuppressPulseFlow.value = System.currentTimeMillis()
                                 } else if (expandedElementFlow.value == tappedId) {

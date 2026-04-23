@@ -98,7 +98,7 @@ data class OverlayPreviewEditor(
     val onElementBoundsChanged: (OverlayElementId, Rect) -> Unit
 )
 
-private const val VERTICAL_TRIM_BASELINE_DP = -32
+private const val VERTICAL_TRIM_BASELINE_DP = -28
 
 private fun lerpDp(start: Dp, end: Dp, fraction: Float): Dp =
     (start.value + (end.value - start.value) * fraction).dp
@@ -261,7 +261,7 @@ fun status_bar_overlay(
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
-            })
+            }.copy(battery_level_slice = if (!battery_snapshot.charging) battery_snapshot.level / 100f else -1f))
         }
         val gs = config.gifSettings
         if (config.showGif && config.gifUri != null && gs.alignment == ALIGN_LEFT) {
@@ -316,7 +316,7 @@ fun status_bar_overlay(
                 editable_overlay_element(OverlayElementId.BATTERY, editor, text_color) {
                     battery_module(battery_snapshot.level, battery_snapshot.charging, bs, text_color, config.fontScale, selected_font_family)
                 }
-            })
+            }.copy(battery_level_slice = if (!battery_snapshot.charging) battery_snapshot.level / 100f else -1f))
         }
         val gs = config.gifSettings
         if (config.showGif && config.gifUri != null && gs.alignment != ALIGN_LEFT) {
