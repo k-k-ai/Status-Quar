@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Status Quar</string>
+    <string name="service_name">Status Quar Overlay</string>
+    <string name="service_description">Displays a customizable status bar overlay at the top of your screen. Enable this service to use Status Quar.</string>
+</resources>
